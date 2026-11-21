@@ -1,4 +1,5 @@
 import { Provider, Settings } from './types';
+import { recordRateHeaders, recordUsage } from './usage';
 
 export interface LlmMessage {
   role: 'user' | 'assistant';
@@ -52,8 +53,16 @@ export async function chat(params: {
       },
       body: JSON.stringify({ model, max_tokens: maxTokens, system, messages }),
     });
+    recordRateHeaders('claude', res.headers);
     if (!res.ok) throw new Error(`Claude API 오류 (${res.status}): ${await readError(res)}`);
     const data = await res.json();
+    recordUsage(
+      'claude',
+      (data.usage?.input_tokens ?? 0) +
+        (data.usage?.cache_creation_input_tokens ?? 0) +
+        (data.usage?.cache_read_input_tokens ?? 0),
+      data.usage?.output_tokens ?? 0,
+    );
     const text = (data.content ?? [])
       .filter((b: { type: string }) => b.type === 'text')
       .map((b: { text: string }) => b.text)
@@ -78,8 +87,10 @@ export async function chat(params: {
       max_output_tokens: maxTokens,
     }),
   });
+  recordRateHeaders('openai', res.headers);
   if (!res.ok) throw new Error(`OpenAI API 오류 (${res.status}): ${await readError(res)}`);
   const data = await res.json();
+  recordUsage('openai', data.usage?.input_tokens ?? 0, data.usage?.output_tokens ?? 0);
   let text = typeof data.output_text === 'string' ? data.output_text : '';
   if (!text) {
     const parts: string[] = [];
@@ -112,10 +123,27 @@ export async function generateImage(settings: Settings, prompt: string): Promise
     },
     body: JSON.stringify({ model: settings.imageModel, prompt, size: '1024x1536', n: 1 }),
   });
+  recordRateHeaders('openai', res.headers);
   if (!res.ok) throw new Error(`이미지 API 오류 (${res.status}): ${await readError(res)}`);
   const data = await res.json();
+  recordUsage('openai', data.usage?.input_tokens ?? 0, data.usage?.output_tokens ?? 0);
   const first = data.data?.[0];
   if (first?.b64_json) return { base64: first.b64_json };
   if (first?.url) return { url: first.url };
   throw new Error('이미지 응답이 비어 있습니다.');
+}
+
+/**
+ * Providers only report remaining limits in response headers, so this sends the
+ * smallest possible request (a few tokens) to refresh them.
+ */
+export async function checkLimits(provider: Provider, settings: Settings, model: string): Promise<void> {
+  await chat({
+    provider,
+    model,
+    system: '짧게 답하세요.',
+    messages: [{ role: 'user', content: 'ping' }],
+    settings,
+    maxTokens: provider === 'claude' ? 1 : 16,
+  });
 }

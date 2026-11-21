@@ -5,13 +5,14 @@ import { ActivityIndicator, View } from 'react-native';
 import { SafeAreaProvider } from 'react-native-safe-area-context';
 import { loadSettings } from '../settings';
 import { loadProject } from '../store';
+import { loadUsage } from '../usage';
 import { colors } from '../ui';
 
 export default function RootLayout() {
   const [ready, setReady] = useState(false);
 
   useEffect(() => {
-    Promise.all([loadSettings(), loadProject()]).finally(() => setReady(true));
+    Promise.all([loadSettings(), loadProject(), loadUsage()]).finally(() => setReady(true));
   }, []);
 
   if (!ready) {

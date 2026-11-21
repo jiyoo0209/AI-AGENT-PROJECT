@@ -72,5 +72,7 @@ export interface Settings {
   openaiKey: string;
   imageModel: string;
   stepApproval: boolean;
+  /** Monthly token budget per provider; 0 means not set. */
+  monthlyTokenBudget: Record<Provider, number>;
   roles: Record<RoleId, RoleModel>;
 }

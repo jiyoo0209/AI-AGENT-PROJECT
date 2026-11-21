@@ -15,6 +15,7 @@ export function defaultSettings(): Settings {
     openaiKey: '',
     imageModel: DEFAULT_IMAGE_MODEL,
     stepApproval: false,
+    monthlyTokenBudget: { claude: 0, openai: 0 },
     roles: {
       pm: { ...claude },
       planner: { ...claude },
@@ -62,6 +63,7 @@ export async function loadSettings(): Promise<void> {
       const saved = JSON.parse(raw) as Partial<Settings>;
       base.imageModel = saved.imageModel || base.imageModel;
       base.stepApproval = saved.stepApproval ?? base.stepApproval;
+      base.monthlyTokenBudget = { ...base.monthlyTokenBudget, ...saved.monthlyTokenBudget };
       if (saved.roles) {
         (Object.keys(base.roles) as RoleId[]).forEach((r) => {
           const m = saved.roles?.[r];

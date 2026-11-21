@@ -10,6 +10,7 @@ import {
 } from '../settings';
 import { Provider, RoleId, Settings } from '../types';
 import { Button, Card, colors } from '../ui';
+import { UsageCard } from '../UsageCard';
 
 export default function SettingsScreen() {
   const saved = useSettings();
@@ -63,6 +64,13 @@ export default function SettingsScreen() {
           autoCorrect={false}
         />
       </Card>
+
+      <UsageCard
+        draft={draft}
+        onBudgetChange={(p, v) =>
+          setDraft((d) => ({ ...d, monthlyTokenBudget: { ...d.monthlyTokenBudget, [p]: v } }))
+        }
+      />
 
       <Card>
         <Text style={styles.title}>역할별 AI 모델</Text>
