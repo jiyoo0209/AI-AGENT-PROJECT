@@ -1,0 +1,58 @@
+name: Smoke test APK
+
+# 빌드된 APK를 에뮬레이터에서 실행해 시작 직후 오류가 없는지 확인하고, 로그를 남깁니다.
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 확인할 릴리스 태그 (예 build-9)
+        required: true
+
+jobs:
+  smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Enable KVM
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+
+      - name: Download APK
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release download "${{ inputs.tag }}" -R "${{ github.repository }}" -p '*.apk' -O app.apk
+
+      - name: Write test script
+        run: |
+          cat > run.sh <<'SH'
+          set -x
+          adb install -r app.apk
+          adb logcat -c
+          adb shell monkey -p com.jiyoo0209.aiagentproject -c android.intent.category.LAUNCHER 1
+          sleep 30
+          adb shell pidof com.jiyoo0209.aiagentproject && echo "APP_ALIVE" || echo "APP_DEAD"
+          adb logcat -d > logcat.txt
+          SH
+
+      - name: Run on emulator
+        uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: 34
+          arch: x86_64
+          target: google_apis
+          emulator-options: -no-window -gpu swiftshader_indirect -no-snapshot -noaudio -no-boot-anim
+          script: bash run.sh
+
+      - name: Show crash log
+        if: always()
+        run: |
+          grep -n -A40 "FATAL EXCEPTION\|AndroidRuntime\|ReactNativeJS\|E unknown:ReactNative\|SoLoader" logcat.txt | head -300 || true
+
+      - name: Upload log
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: logcat
+          path: logcat.txt
