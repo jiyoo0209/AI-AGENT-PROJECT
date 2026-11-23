@@ -6,10 +6,11 @@
 import { query } from '@anthropic-ai/claude-agent-sdk';
 import { Codex } from '@openai/codex-sdk';
 import { randomUUID, timingSafeEqual } from 'node:crypto';
-import { createReadStream, existsSync, mkdirSync, openSync, readFileSync, readSync, readdirSync, rmSync, statSync, closeSync } from 'node:fs';
+import { createReadStream, existsSync, mkdirSync, openSync, readFileSync, readSync, readdirSync, renameSync, rmSync, statSync, closeSync } from 'node:fs';
 import http from 'node:http';
 import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { gzipSync } from 'node:zlib';
 import { register as registerTypeScript } from 'tsx/esm/api';
 import { createPush } from './push.mjs';
 
@@ -20,7 +21,7 @@ const WORK_ROOT = join(tmpdir(), 'ai-agent-server');
 const MAX_BODY = 5 * 1024 * 1024;
 const HEARTBEAT_MS = 15000;
 const CHAT_TIMEOUT_MS = 10 * 60 * 1000;
-const IMAGE_TIMEOUT_MS = 6 * 60 * 1000;
+const IMAGE_TIMEOUT_MS = 10 * 60 * 1000;
 
 if (!TOKEN) {
   console.error('SERVER_TOKEN 환경 변수가 필요합니다.');
@@ -409,6 +410,9 @@ const push = createPush({
 });
 const office = createOffice({
   dataDir: DATA_DIR,
+  onImageSaved: (id) => {
+    for (const v of ['thumb', 'preview']) imageVariant(id, v).catch(() => {});
+  },
   chat: ({ provider, ...p }) => {
     console.log(`[office] ${provider} ${p.model || '(기본 모델)'}`);
     return provider === 'openai' ? codexChat(p) : claudeChat(p);
@@ -420,6 +424,42 @@ const office = createOffice({
   },
 });
 console.log(`데이터 폴더: ${DATA_DIR}`);
+
+// ---------- 이미지 미리보기 ----------
+// AI가 만든 PNG는 수 MB라 폰에서 느립니다. 화면용으로 작게 줄인 WebP를 만들어 캐시합니다.
+
+const VARIANTS = { thumb: 360, preview: 1280 };
+const PREVIEW_DIR = join(DATA_DIR, 'previews');
+mkdirSync(PREVIEW_DIR, { recursive: true });
+let sharp = null;
+try {
+  sharp = (await import('sharp')).default;
+} catch {
+  console.log('[image] sharp가 없어 원본 이미지를 그대로 보냅니다. (cd server && npm install)');
+}
+const making = new Map();
+
+/** 미리보기 파일 경로. 만들 수 없으면 null (원본을 보냄). */
+async function imageVariant(id, variant) {
+  const f = office.file(id);
+  if (!f || !sharp || !VARIANTS[variant] || !f.mime.startsWith('image/') || f.mime === 'image/svg+xml') return null;
+  const out = join(PREVIEW_DIR, `${id}-${variant}.webp`);
+  if (existsSync(out)) return out;
+  if (!making.has(out)) {
+    const size = VARIANTS[variant];
+    const job = sharp(f.path)
+      .resize(size, size, { fit: 'inside', withoutEnlargement: true })
+      .webp({ quality: variant === 'thumb' ? 70 : 82 })
+      .toFile(out + '.tmp')
+      .then(() => {
+        renameSync(out + '.tmp', out);
+        return out;
+      })
+      .finally(() => making.delete(out));
+    making.set(out, job);
+  }
+  return making.get(out);
+}
 
 // ---------- HTTP ----------
 
@@ -477,8 +517,16 @@ async function longJson(res, work) {
 }
 
 function send(res, status, body, type = 'application/json; charset=utf-8') {
-  res.writeHead(status, { 'Content-Type': type, 'Cache-Control': 'no-store' });
-  res.end(typeof body === 'string' ? body : JSON.stringify(body));
+  const text = typeof body === 'string' ? body : JSON.stringify(body);
+  const headers = { 'Content-Type': type, 'Cache-Control': 'no-store' };
+  // 프로젝트 상태(JSON)는 수백 KB가 될 수 있어 압축해서 보냅니다.
+  if (text.length > 1024 && /\bgzip\b/.test(res.req?.headers['accept-encoding'] || '')) {
+    const gz = gzipSync(text);
+    res.writeHead(status, { ...headers, 'Content-Encoding': 'gzip', 'Content-Length': gz.length });
+    return res.end(gz);
+  }
+  res.writeHead(status, headers);
+  res.end(text);
 }
 
 const server = http.createServer(async (req, res) => {
@@ -525,10 +573,18 @@ const server = http.createServer(async (req, res) => {
     if (fileMatch) {
       const f = office.file(fileMatch[1]);
       if (!f) return send(res, 404, { error: { message: '파일이 없습니다.' } });
+      // 산출물은 바뀔 때마다 새 id를 받으므로, 같은 주소의 내용은 바뀌지 않습니다. 폰이 오래 캐시해도 됩니다.
+      const cache = 'private, max-age=31536000, immutable';
+      const variant = url.searchParams.get('v');
+      const small = variant ? await imageVariant(fileMatch[1], variant).catch(() => null) : null;
+      if (small) {
+        res.writeHead(200, { 'Content-Type': 'image/webp', 'Content-Length': statSync(small).size, 'Cache-Control': cache });
+        return createReadStream(small).pipe(res);
+      }
       res.writeHead(200, {
         'Content-Type': f.mime.startsWith('image/') ? f.mime : `${f.mime}; charset=utf-8`,
         'Content-Length': f.size,
-        'Cache-Control': 'no-store',
+        'Cache-Control': cache,
       });
       return createReadStream(f.path).pipe(res);
     }

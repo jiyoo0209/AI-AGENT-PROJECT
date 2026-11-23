@@ -6,8 +6,16 @@ import { authHeaders, serverBase } from './llm';
 import { getSettings } from './settings';
 import { Deliverable } from './types';
 
-export function fileUrl(d: Deliverable): string {
-  return `${serverBase(getSettings())}/v1/files/${d.id}`;
+/** thumb: 목록용 작은 이미지, preview: 화면용 이미지 (둘 다 서버가 작게 줄인 WebP). 없으면 원본. */
+export type ImageVariant = 'thumb' | 'preview';
+
+export function fileUrl(d: Deliverable, variant?: ImageVariant): string {
+  return `${serverBase(getSettings())}/v1/files/${d.id}${variant ? `?v=${variant}` : ''}`;
+}
+
+/** expo-image에 넘길 이미지 주소. 같은 산출물은 내용이 바뀌지 않으므로 기기에 오래 캐시합니다. */
+export function imageSource(d: Deliverable, variant: ImageVariant) {
+  return { uri: fileUrl(d, variant), headers: fileHeaders() };
 }
 
 export function fileHeaders(): Record<string, string> {
@@ -15,19 +23,18 @@ export function fileHeaders(): Record<string, string> {
 }
 
 export async function readText(d: Deliverable): Promise<string> {
-  let res: Response;
+  let file: File;
   try {
-    res = await fetch(fileUrl(d), { headers: fileHeaders() });
-  } catch {
-    throw new Error('서버에 연결하지 못해 파일을 열 수 없어요.');
+    file = await localCopy(d);
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    throw new Error(/404/.test(msg) ? '서버에서 파일을 찾지 못했어요.' : '서버에 연결하지 못해 파일을 열 수 없어요.');
   }
-  if (res.status === 404) throw new Error('서버에서 파일을 찾지 못했어요.');
-  if (!res.ok) throw new Error(`파일을 읽지 못했어요 (${res.status}).`);
-  const text = await res.text();
-  return text.startsWith('﻿') ? text.slice(1) : text;
+  const text = await file.text();
+  return text.startsWith('\uFEFF') ? text.slice(1) : text;
 }
 
-/** 서버의 파일을 기기 캐시에 내려받습니다. */
+/** 서버의 파일을 기기 캐시에 내려받습니다. 한 번 받은 파일은 다시 받지 않습니다. */
 async function localCopy(d: Deliverable): Promise<File> {
   const dir = new Directory(Paths.cache, 'deliverables', d.id);
   if (!dir.exists) dir.create({ intermediates: true, idempotent: true });

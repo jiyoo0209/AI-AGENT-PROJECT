@@ -1,7 +1,8 @@
 import { Stack, useLocalSearchParams } from 'expo-router';
 import { useEffect, useState } from 'react';
-import { ActivityIndicator, Image, ScrollView, StyleSheet, Text, View } from 'react-native';
-import { fileHeaders, fileUrl, readText } from '../../deliverables';
+import { Image } from 'expo-image';
+import { ActivityIndicator, ScrollView, StyleSheet, Text, View } from 'react-native';
+import { imageSource, readText } from '../../deliverables';
 import { downloadWithAlert, shareWithAlert } from '../../FileCard';
 import { roleInfo } from '../../roles';
 import { useProject } from '../../store';
@@ -63,6 +64,7 @@ export default function Viewer() {
   const d = useProject().deliverables.find((x) => x.id === id);
   const [content, setContent] = useState<string | null>(null);
   const [error, setError] = useState('');
+  const [ratio, setRatio] = useState(1);
 
   useEffect(() => {
     if (!d || d.isBinary) return;
@@ -95,7 +97,19 @@ export default function Viewer() {
       </View>
       {d.isBinary ? (
         <ScrollView contentContainerStyle={{ padding: 12 }}>
-          <Image source={{ uri: fileUrl(d), headers: fileHeaders() }} style={styles.image} resizeMode="contain" />
+          <Image
+            source={imageSource(d, 'preview')}
+            placeholder={imageSource(d, 'thumb')}
+            placeholderContentFit="contain"
+            cachePolicy="disk"
+            contentFit="contain"
+            transition={150}
+            onLoad={(e) => e.source.width && setRatio(e.source.width / e.source.height)}
+            onError={() => setError('이미지를 불러오지 못했어요. 서버 연결을 확인하세요.')}
+            style={[styles.image, { aspectRatio: ratio }]}
+            accessibilityLabel={d.name}
+          />
+          {!!error && <Text style={[styles.sub, { marginTop: 8 }]}>{error}</Text>}
         </ScrollView>
       ) : error ? (
         <View style={styles.center}>
@@ -132,7 +146,7 @@ const styles = StyleSheet.create({
   actions: { flexDirection: 'row', gap: 8 },
   sub: { color: colors.sub, fontSize: 13 },
   content: { fontSize: 14, color: colors.text, lineHeight: 21, fontFamily: 'monospace' },
-  image: { width: '100%', aspectRatio: 2 / 3, borderRadius: 8, backgroundColor: '#eee' },
+  image: { width: '100%', borderRadius: 8, backgroundColor: '#eee' },
   tr: { flexDirection: 'row', borderBottomWidth: 1, borderBottomColor: colors.border },
   th: { backgroundColor: '#EEF2FF' },
   td: { width: 140, padding: 8, fontSize: 12, color: colors.text },

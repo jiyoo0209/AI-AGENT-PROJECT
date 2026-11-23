@@ -1,6 +1,7 @@
+import { Image } from 'expo-image';
 import { router } from 'expo-router';
 import { Alert, Pressable, StyleSheet, Text, View } from 'react-native';
-import { downloadDeliverable, shareDeliverable } from './deliverables';
+import { downloadDeliverable, imageSource, shareDeliverable } from './deliverables';
 import { roleInfo } from './roles';
 import { Deliverable } from './types';
 import { Button, colors } from './ui';
@@ -29,9 +30,13 @@ export function FileCard({ d, showRole }: { d: Deliverable; showRole?: boolean }
   return (
     <View style={styles.card}>
       <Pressable style={styles.info} onPress={() => router.push(`/viewer/${d.id}`)}>
-        <View style={styles.ext}>
-          <Text style={styles.extText}>{ext.slice(0, 4)}</Text>
-        </View>
+        {d.isBinary ? (
+          <Image source={imageSource(d, 'thumb')} cachePolicy="disk" contentFit="cover" style={styles.ext} />
+        ) : (
+          <View style={styles.ext}>
+            <Text style={styles.extText}>{ext.slice(0, 4)}</Text>
+          </View>
+        )}
         <View style={{ flex: 1 }}>
           <Text style={styles.name} numberOfLines={1}>
             {d.name}

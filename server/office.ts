@@ -98,7 +98,14 @@ function statusLabel(s: Task['status']): string {
   return { pending: '대기', running: '진행 중', done: '완료', failed: '실패' }[s];
 }
 
-export function createOffice(opts: { dataDir: string; chat: ChatFn; image: ImageFn; notify: (a: Attention) => void }) {
+export function createOffice(opts: {
+  dataDir: string;
+  chat: ChatFn;
+  image: ImageFn;
+  notify: (a: Attention) => void;
+  /** 이미지가 저장되면 불립니다 (미리보기를 미리 만들어 둠). */
+  onImageSaved?: (id: string) => void;
+}) {
   const { dataDir } = opts;
   const filesDir = join(dataDir, 'files');
   mkdirSync(filesDir, { recursive: true });
@@ -218,7 +225,7 @@ export function createOffice(opts: { dataDir: string; chat: ChatFn; image: Image
     const dir = join(filesDir, role);
     mkdirSync(dir, { recursive: true });
     writeFileSync(join(dir, name), data);
-    return upsert({
+    const d = upsert({
       id: newId(),
       role,
       name,
@@ -229,6 +236,8 @@ export function createOffice(opts: { dataDir: string; chat: ChatFn; image: Image
       taskId,
       createdAt: Date.now(),
     });
+    if (isBinary) opts.onImageSaved?.(d.id);
+    return d;
   }
 
   function saveText(role: RoleId, name: string, content: string, taskId?: string): Deliverable {

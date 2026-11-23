@@ -1,8 +1,10 @@
 // 서버와 상태 맞추기
 // AI 팀은 서버에서 일하고, 앱은 화면에 보이는 동안 서버 상태를 계속 받아 옵니다(롱 폴링).
 
+import { Image } from 'expo-image';
 import { AppState } from 'react-native';
 import { useSyncExternalStore } from 'react';
+import { imageSource } from './deliverables';
 import { callServer, refreshLimits } from './llm';
 import { markAttentionSeen, registerPush } from './notify';
 import { getSettings, subscribeSettings } from './settings';
@@ -52,13 +54,28 @@ export function useSyncStatus(): SyncStatus {
 }
 
 let rev = 0;
+let failures = 0;
 let generation = 0;
 let controller: AbortController | undefined;
+
+/** 새 시안 이미지는 열기 전에 미리 받아 둡니다. */
+const prefetched = new Set<string>();
+function prefetchImages(p: Project) {
+  for (const d of p.deliverables) {
+    if (!d.isBinary || prefetched.has(d.id)) continue;
+    prefetched.add(d.id);
+    for (const v of ['thumb', 'preview'] as const) {
+      const src = imageSource(d, v);
+      Image.prefetch(src.uri, { headers: src.headers, cachePolicy: 'disk' }).catch(() => prefetched.delete(d.id));
+    }
+  }
+}
 
 function apply(s: ServerState) {
   rev = s.rev;
   projectStore.set(() => s.project);
   busyStore.set(() => s.busy);
+  prefetchImages(s.project);
   if (s.usage) setMonthlyUsage(s.usage.month, s.usage.byProvider);
   // 앱을 보고 있으면 알림이 따로 필요 없습니다.
   if (s.attention) markAttentionSeen(s.attention.id).catch(() => {});
@@ -75,16 +92,19 @@ async function loop(gen: number) {
       return;
     }
     try {
-      // 처음 한 번은 바로, 그다음부터는 바뀔 때까지 최대 25초 기다립니다.
-      const wait = rev === 0 ? 0 : 25;
+      // 처음 한 번은 바로, 그다음부터는 바뀔 때까지 최대 20초 기다립니다.
+      const wait = rev === 0 ? 0 : 20;
       const s = await callServer<ServerState>(settings, `/v1/state?since=${rev}&wait=${wait}`, undefined, controller?.signal);
       if (gen !== generation) return;
       apply(s);
+      failures = 0;
       setStatus({ connected: true });
     } catch (e) {
       if (gen !== generation) return;
-      setStatus({ connected: false, error: e instanceof Error ? e.message : String(e) });
-      await sleep(5000);
+      // 모바일 네트워크에서는 한 번씩 끊기는 일이 흔해서, 연달아 실패할 때만 알립니다.
+      failures++;
+      if (failures >= 2) setStatus({ connected: false, error: e instanceof Error ? e.message : String(e) });
+      await sleep(failures === 1 ? 1000 : 5000);
     }
   }
 }
