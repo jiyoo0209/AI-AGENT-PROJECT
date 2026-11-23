@@ -1,5 +1,5 @@
 import { Provider, Settings } from './types';
-import { recordRateHeaders, recordUsage } from './usage';
+import { recordRateHeaders, recordSubscriptionLimit, recordUsage } from './usage';
 
 export interface LlmMessage {
   role: 'user' | 'assistant';
@@ -19,6 +19,57 @@ function normalize(messages: LlmMessage[]): LlmMessage[] {
     out.unshift({ role: 'user', content: '(대화 시작)' });
   }
   return out;
+}
+
+/** 맥미니 서버 주소가 있으면 API 키 대신 서버(구독)로 호출합니다. */
+export function usesServer(settings: Settings): boolean {
+  return !!settings.serverUrl.trim();
+}
+
+interface ServerUsage {
+  input?: number;
+  output?: number;
+}
+
+/**
+ * 맥미니 서버에 요청합니다. 서버는 오래 걸리는 작업 동안 공백을 먼저 보내고
+ * 마지막에 JSON을 보내므로, 실패도 200 응답 본문의 error 필드로 옵니다.
+ */
+async function callServer<T>(settings: Settings, path: string, body?: unknown): Promise<T> {
+  if (!settings.serverToken) throw new Error('맥미니 서버 토큰이 없습니다. 설정에서 입력하세요.');
+  const base = settings.serverUrl.trim().replace(/\/+$/, '');
+  let res: Response;
+  try {
+    res = await fetch(base + path, {
+      method: body === undefined ? 'GET' : 'POST',
+      headers: {
+        authorization: `Bearer ${settings.serverToken}`,
+        ...(body === undefined ? {} : { 'content-type': 'application/json' }),
+      },
+      body: body === undefined ? undefined : JSON.stringify(body),
+    });
+  } catch (e) {
+    throw new Error(
+      `맥미니 서버에 연결하지 못했습니다. 맥미니가 켜져 있는지, 주소가 맞는지 확인하세요. (${e instanceof Error ? e.message : String(e)})`,
+    );
+  }
+  if (res.status === 401) throw new Error('맥미니 서버 토큰이 맞지 않습니다. 설정의 토큰을 확인하세요.');
+  const raw = await res.text();
+  let data: any;
+  try {
+    data = JSON.parse(raw);
+  } catch {
+    throw new Error(`맥미니 서버 오류 (${res.status}): ${raw.trim().slice(0, 200) || '빈 응답'}`);
+  }
+  if (!res.ok || data?.error) {
+    throw new Error(`맥미니 서버 오류: ${data?.error?.message ?? res.statusText}`);
+  }
+  return data as T;
+}
+
+/** 설정 화면의 연결 테스트용 */
+export async function checkServer(settings: Settings): Promise<void> {
+  await callServer(settings, '/v1/health');
 }
 
 async function readError(res: Response): Promise<string> {
@@ -41,6 +92,17 @@ export async function chat(params: {
   const { provider, model, system, settings } = params;
   const messages = normalize(params.messages);
   const maxTokens = params.maxTokens ?? 16000;
+
+  if (usesServer(settings)) {
+    const data = await callServer<{
+      text: string;
+      usage?: ServerUsage;
+      limits?: Parameters<typeof recordSubscriptionLimit>[1];
+    }>(settings, '/v1/chat', { provider, model, system, messages, maxTokens });
+    recordUsage(provider, data.usage?.input ?? 0, data.usage?.output ?? 0);
+    if (data.limits) recordSubscriptionLimit(provider, data.limits);
+    return data.text ?? '';
+  }
 
   if (provider === 'claude') {
     if (!settings.anthropicKey) throw new Error('Claude API 키가 없습니다. 설정에서 입력하세요.');
@@ -114,6 +176,12 @@ export interface GeneratedImage {
 }
 
 export async function generateImage(settings: Settings, prompt: string): Promise<GeneratedImage> {
+  if (usesServer(settings)) {
+    const data = await callServer<{ base64?: string; usage?: ServerUsage }>(settings, '/v1/image', { prompt });
+    recordUsage('openai', data.usage?.input ?? 0, data.usage?.output ?? 0);
+    if (!data.base64) throw new Error('이미지 응답이 비어 있습니다.');
+    return { base64: data.base64 };
+  }
   if (!settings.openaiKey) throw new Error('시안 이미지는 OpenAI API 키가 있어야 만들 수 있습니다.');
   const res = await fetch('https://api.openai.com/v1/images/generations', {
     method: 'POST',

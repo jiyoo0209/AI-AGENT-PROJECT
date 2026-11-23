@@ -13,6 +13,10 @@ export interface RateSnapshot {
   requestsRemaining?: number;
   requestsLimit?: number;
   reset?: string;
+  /** 구독(Claude Pro 등) 한도 사용률 0~1. 맥미니 서버를 쓸 때만 옵니다. */
+  utilization?: number;
+  limitType?: string;
+  limitStatus?: string;
   at: number;
 }
 
@@ -102,6 +106,28 @@ function num(headers: Headers, name: string): number | undefined {
   if (v == null || v === '') return undefined;
   const n = Number(v);
   return Number.isFinite(n) ? n : undefined;
+}
+
+/** 맥미니 서버가 알려준 구독 한도 상태를 기록합니다. */
+export function recordSubscriptionLimit(
+  provider: Provider,
+  info: { status?: string; utilization?: number; resetsAt?: number; type?: string },
+) {
+  let reset: string | undefined;
+  if (typeof info.resetsAt === 'number' && info.resetsAt > 0) {
+    // 초 단위와 밀리초 단위 모두 받아 줍니다.
+    const ms = info.resetsAt < 1e12 ? info.resetsAt * 1000 : info.resetsAt;
+    reset = new Date(ms).toISOString();
+  }
+  const snap: RateSnapshot = {
+    utilization: typeof info.utilization === 'number' ? info.utilization : undefined,
+    limitType: info.type,
+    limitStatus: info.status,
+    reset,
+    at: Date.now(),
+  };
+  const s = current();
+  set({ ...s, rate: { ...s.rate, [provider]: snap } });
 }
 
 export function recordRateHeaders(provider: Provider, headers: Headers) {

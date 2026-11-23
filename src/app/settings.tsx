@@ -1,6 +1,7 @@
 import { router } from 'expo-router';
 import { useState } from 'react';
 import { Alert, ScrollView, StyleSheet, Switch, Text, TextInput, View } from 'react-native';
+import { checkServer } from '../llm';
 import { ROLES } from '../roles';
 import {
   DEFAULT_CLAUDE_MODEL,
@@ -16,6 +17,19 @@ export default function SettingsScreen() {
   const saved = useSettings();
   const [draft, setDraft] = useState<Settings>(() => JSON.parse(JSON.stringify(saved)));
   const [saving, setSaving] = useState(false);
+  const [testing, setTesting] = useState(false);
+
+  const testServer = async () => {
+    setTesting(true);
+    try {
+      await checkServer(draft);
+      Alert.alert('연결 성공', '맥미니 서버에 연결되었습니다. 저장을 눌러 적용하세요.');
+    } catch (e) {
+      Alert.alert('연결 실패', e instanceof Error ? e.message : String(e));
+    } finally {
+      setTesting(false);
+    }
+  };
 
   const setRole = (role: RoleId, patch: Partial<Settings['roles'][RoleId]>) =>
     setDraft((d) => ({ ...d, roles: { ...d.roles, [role]: { ...d.roles[role], ...patch } } }));
@@ -41,8 +55,46 @@ export default function SettingsScreen() {
   return (
     <ScrollView contentContainerStyle={styles.container} keyboardShouldPersistTaps="handled">
       <Card>
+        <Text style={styles.title}>맥미니 서버 (구독 사용)</Text>
+        <Text style={styles.sub}>
+          주소를 넣으면 API 키 대신 맥미니에 로그인된 Claude Pro와 ChatGPT Plus 구독으로 일합니다. 토큰은 이 기기의 보안 저장소에만 저장됩니다.
+        </Text>
+        <Text style={styles.label}>서버 주소</Text>
+        <TextInput
+          style={styles.input}
+          value={draft.serverUrl}
+          onChangeText={(v) => setDraft((d) => ({ ...d, serverUrl: v }))}
+          placeholder="https://macmini.xxxx.ts.net"
+          autoCapitalize="none"
+          autoCorrect={false}
+          keyboardType="url"
+        />
+        <Text style={styles.label}>토큰</Text>
+        <TextInput
+          style={styles.input}
+          value={draft.serverToken}
+          onChangeText={(v) => setDraft((d) => ({ ...d, serverToken: v }))}
+          placeholder="맥미니 서버의 SERVER_TOKEN"
+          secureTextEntry
+          autoCapitalize="none"
+          autoCorrect={false}
+        />
+        <Button
+          small
+          variant="secondary"
+          title="연결 테스트"
+          onPress={testServer}
+          loading={testing}
+          disabled={!draft.serverUrl.trim() || !draft.serverToken.trim()}
+          style={{ marginTop: 12 }}
+        />
+      </Card>
+
+      <Card>
         <Text style={styles.title}>API 키</Text>
-        <Text style={styles.sub}>키는 이 기기의 보안 저장소에만 저장되고, 각 AI 회사 서버로만 전송됩니다.</Text>
+        <Text style={styles.sub}>
+          맥미니 서버를 쓰면 비워 두세요. 서버 주소가 비어 있을 때만 쓰입니다. 키는 이 기기의 보안 저장소에만 저장되고, 각 AI 회사 서버로만 전송됩니다.
+        </Text>
         <Text style={styles.label}>Claude (Anthropic) API 키</Text>
         <TextInput
           style={styles.input}
@@ -74,7 +126,9 @@ export default function SettingsScreen() {
 
       <Card>
         <Text style={styles.title}>역할별 AI 모델</Text>
-        <Text style={styles.sub}>모델명은 각 회사의 API 모델 ID를 그대로 적습니다.</Text>
+        <Text style={styles.sub}>
+          모델명은 각 회사의 모델 ID를 그대로 적습니다. 맥미니 서버에서 쓸 수 없는 모델이면 각 구독의 기본 모델로 답합니다.
+        </Text>
         {ROLES.map((r) => {
           const m = draft.roles[r.id];
           return (
@@ -102,7 +156,7 @@ export default function SettingsScreen() {
             </View>
           );
         })}
-        <Text style={styles.label}>디자인 시안 이미지 모델 (OpenAI)</Text>
+        <Text style={styles.label}>디자인 시안 이미지 모델 (OpenAI, API 키를 쓸 때만)</Text>
         <TextInput
           style={styles.input}
           value={draft.imageModel}

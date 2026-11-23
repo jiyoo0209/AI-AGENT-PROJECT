@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import { Alert, StyleSheet, Text, TextInput, View } from 'react-native';
-import { checkLimits } from './llm';
+import { checkLimits, usesServer } from './llm';
 import { DEFAULT_CLAUDE_MODEL, DEFAULT_OPENAI_MODEL } from './settings';
 import { Provider, RoleId, Settings } from './types';
 import { Button, Card, colors } from './ui';
@@ -37,6 +37,20 @@ function RateRows({ provider, rate }: { provider: Provider; rate?: RateSnapshot 
   if (!rate) {
     return <Text style={styles.sub}>아직 기록이 없습니다. "지금 확인"을 누르거나 에이전트를 한 번 실행하세요.</Text>;
   }
+  if (rate.utilization !== undefined || rate.limitStatus !== undefined) {
+    return (
+      <>
+        {rate.utilization !== undefined && <Bar ratio={1 - rate.utilization} />}
+        <Row
+          label={`구독 한도 사용률${rate.limitType ? ` (${limitTypeLabel(rate.limitType)})` : ''}`}
+          value={rate.utilization !== undefined ? `${Math.round(rate.utilization * 100)}%` : '-'}
+        />
+        <Row label="상태" value={limitStatusLabel(rate.limitStatus)} />
+        <Row label="한도 초기화" value={formatReset(rate.reset)} />
+        <Row label="마지막 확인" value={new Date(rate.at).toLocaleString()} />
+      </>
+    );
+  }
   const main =
     rate.tokensLimit !== undefined
       ? { r: rate.tokensRemaining, l: rate.tokensLimit }
@@ -57,6 +71,19 @@ function RateRows({ provider, rate }: { provider: Provider; rate?: RateSnapshot 
       <Row label="마지막 확인" value={new Date(rate.at).toLocaleString()} />
     </>
   );
+}
+
+function limitTypeLabel(t: string): string {
+  if (t === 'five_hour') return '5시간';
+  if (t.startsWith('seven_day')) return '주간';
+  return t;
+}
+
+function limitStatusLabel(s?: string): string {
+  if (s === 'allowed') return '여유 있음';
+  if (s === 'allowed_warning') return '한도 가까움';
+  if (s === 'rejected') return '한도 도달';
+  return '-';
 }
 
 function Row({ label, value }: { label: string; value: string }) {
@@ -98,10 +125,13 @@ export function UsageCard(props: {
     <Card>
       <Text style={styles.title}>사용량 · 남은 한도</Text>
       <Text style={styles.sub}>
-        분당 한도는 각 회사가 응답마다 알려주는 값입니다. 계정의 충전 잔액은 각 회사 콘솔에서 확인하세요. 월 예산을 정해 두면 이 앱에서 쓴 토큰 기준으로 남은 양을 보여줍니다.
+        {usesServer(props.draft)
+          ? '맥미니 서버를 쓰는 중입니다. Claude는 Pro 구독 한도 사용률을 보여 주고, ChatGPT 구독 한도는 Codex에서 확인하세요. 월 예산을 정해 두면 이 앱에서 쓴 토큰 기준으로 남은 양을 보여줍니다.'
+          : '분당 한도는 각 회사가 응답마다 알려주는 값입니다. 계정의 충전 잔액은 각 회사 콘솔에서 확인하세요. 월 예산을 정해 두면 이 앱에서 쓴 토큰 기준으로 남은 양을 보여줍니다.'}
       </Text>
       {(['claude', 'openai'] as Provider[]).map((p) => {
-        const hasKey = p === 'claude' ? !!props.draft.anthropicKey : !!props.draft.openaiKey;
+        const hasKey =
+          usesServer(props.draft) || (p === 'claude' ? !!props.draft.anthropicKey : !!props.draft.openaiKey);
         const month = usage.byProvider[p];
         const used = month.input + month.output;
         const budget = props.draft.monthlyTokenBudget[p];
@@ -118,9 +148,9 @@ export function UsageCard(props: {
                 loading={checking === p}
               />
             </View>
-            {!hasKey && <Text style={styles.sub}>API 키를 넣으면 확인할 수 있습니다.</Text>}
+            {!hasKey && <Text style={styles.sub}>API 키나 맥미니 서버를 넣으면 확인할 수 있습니다.</Text>}
 
-            <Text style={styles.section}>분당 한도</Text>
+            <Text style={styles.section}>{usesServer(props.draft) ? '구독 한도' : '분당 한도'}</Text>
             <RateRows provider={p} rate={usage.rate[p]} />
 
             <Text style={styles.section}>이번 달 이 앱 사용량 ({usage.month})</Text>

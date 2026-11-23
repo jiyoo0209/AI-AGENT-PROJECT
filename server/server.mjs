@@ -1,0 +1,364 @@
+// AI 프로젝트매니저 맥미니 서버
+// 폰 앱의 요청을 받아 Claude Pro(Claude Agent SDK)와 ChatGPT Plus(Codex SDK) 구독으로 처리합니다.
+// API 키를 쓰지 않도록 ANTHROPIC_API_KEY / OPENAI_API_KEY / CODEX_API_KEY 는 하위 프로세스에 넘기지 않습니다.
+
+import { query } from '@anthropic-ai/claude-agent-sdk';
+import { Codex } from '@openai/codex-sdk';
+import { randomUUID, timingSafeEqual } from 'node:crypto';
+import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync } from 'node:fs';
+import http from 'node:http';
+import { homedir, tmpdir } from 'node:os';
+import { join } from 'node:path';
+
+const TOKEN = process.env.SERVER_TOKEN || '';
+const PORT = Number(process.env.PORT || 3000);
+const HOST = process.env.HOST || '127.0.0.1';
+const WORK_ROOT = join(tmpdir(), 'ai-agent-server');
+const MAX_BODY = 5 * 1024 * 1024;
+const HEARTBEAT_MS = 15000;
+const CHAT_TIMEOUT_MS = 10 * 60 * 1000;
+const IMAGE_TIMEOUT_MS = 6 * 60 * 1000;
+
+if (!TOKEN) {
+  console.error('SERVER_TOKEN 환경 변수가 필요합니다.');
+  process.exit(1);
+}
+mkdirSync(WORK_ROOT, { recursive: true });
+
+/** 구독 로그인만 쓰도록 API 키 환경 변수를 뺀 환경 */
+function subscriptionEnv() {
+  const env = { ...process.env };
+  delete env.ANTHROPIC_API_KEY;
+  delete env.ANTHROPIC_AUTH_TOKEN;
+  delete env.OPENAI_API_KEY;
+  delete env.CODEX_API_KEY;
+  delete env.SERVER_TOKEN;
+  return Object.fromEntries(Object.entries(env).filter(([, v]) => typeof v === 'string'));
+}
+
+function workDir() {
+  const dir = join(WORK_ROOT, randomUUID());
+  mkdirSync(dir, { recursive: true });
+  return dir;
+}
+
+function cleanup(dir) {
+  try {
+    rmSync(dir, { recursive: true, force: true });
+  } catch {
+    // 임시 폴더 삭제 실패는 무시
+  }
+}
+
+/** 여러 턴의 대화를 한 번의 요청 문장으로 합칩니다. */
+function transcript(messages) {
+  const list = (messages || []).filter((m) => m && typeof m.content === 'string' && m.content.trim());
+  if (list.length === 0) return '(대화 시작)';
+  if (list.length === 1) return list[0].content;
+  const body = list
+    .map((m) => `[${m.role === 'assistant' ? '어시스턴트' : '사용자'}]\n${m.content}`)
+    .join('\n\n');
+  return `아래는 지금까지의 대화입니다. 마지막 [사용자] 메시지에 [어시스턴트]로서 답하세요. 답변 앞에 [어시스턴트] 표시는 붙이지 마세요.\n\n${body}`;
+}
+
+/** 로그인 문제일 때 맥미니에서 할 일을 덧붙입니다. */
+function withHint(provider, e) {
+  const msg = e instanceof Error ? e.message : String(e);
+  const t = msg.toLowerCase();
+  if (t.includes('abort')) return new Error(`${provider === 'openai' ? 'ChatGPT' : 'Claude'} 응답 시간이 초과되었습니다.`);
+  if (t.includes('auth') || t.includes('login') || t.includes('401') || t.includes('unauthorized')) {
+    const how = provider === 'openai' ? '`codex` 실행 후 Sign in with ChatGPT' : '`claude` 실행 후 /login';
+    return new Error(`${msg}\n(맥미니 로그인이 풀렸을 수 있습니다. 맥미니 터미널에서 ${how}로 다시 로그인하세요.)`);
+  }
+  return e instanceof Error ? e : new Error(msg);
+}
+
+function isModelError(e) {
+  const t = String(e?.message || e).toLowerCase();
+  return t.includes('model') && (t.includes('not found') || t.includes('invalid') || t.includes('not supported') || t.includes('unknown') || t.includes('does not exist') || t.includes('not available'));
+}
+
+// ---------- Claude (Pro 구독) ----------
+
+async function claudeOnce({ model, system, prompt, signal }) {
+  const dir = workDir();
+  const abortController = new AbortController();
+  const timer = setTimeout(() => abortController.abort(), CHAT_TIMEOUT_MS);
+  const onAbort = () => abortController.abort();
+  signal?.addEventListener('abort', onAbort);
+  let result;
+  let limits;
+  try {
+    const q = query({
+      prompt,
+      options: {
+        systemPrompt: system || undefined,
+        model: model || undefined,
+        tools: [],
+        maxTurns: 1,
+        settingSources: [],
+        persistSession: false,
+        cwd: dir,
+        env: subscriptionEnv(),
+        abortController,
+      },
+    });
+    for await (const m of q) {
+      if (m.type === 'rate_limit_event') limits = m.rate_limit_info;
+      if (m.type === 'result') result = m;
+    }
+  } finally {
+    clearTimeout(timer);
+    signal?.removeEventListener('abort', onAbort);
+    cleanup(dir);
+  }
+  if (!result) throw new Error('Claude 응답이 없습니다.');
+  if (result.subtype !== 'success' || result.is_error) {
+    const detail = (result.errors && result.errors.join(' ')) || result.result || result.subtype;
+    throw new Error(`Claude 오류: ${detail}`);
+  }
+  const u = result.usage || {};
+  let text = result.result || '';
+  if (result.stop_reason === 'max_tokens') {
+    text += '\n\n(응답이 길어 중간에 끊겼습니다. "이어서 작성해줘"라고 요청하세요.)';
+  }
+  return {
+    text,
+    usage: {
+      input: (u.input_tokens || 0) + (u.cache_creation_input_tokens || 0) + (u.cache_read_input_tokens || 0),
+      output: u.output_tokens || 0,
+    },
+    limits: limits
+      ? {
+          status: limits.status,
+          utilization: limits.utilization,
+          resetsAt: limits.resetsAt,
+          type: limits.rateLimitType,
+        }
+      : undefined,
+  };
+}
+
+async function claudeChat({ model, system, messages }, signal) {
+  const prompt = transcript(messages);
+  try {
+    return await claudeOnce({ model, system, prompt, signal });
+  } catch (e) {
+    if (model && isModelError(e)) {
+      const r = await claudeOnce({ model: undefined, system, prompt, signal });
+      r.text += `\n\n(모델 "${model}"을 쓸 수 없어 기본 모델로 답했습니다. 설정에서 모델 ID를 확인하세요.)`;
+      return r;
+    }
+    throw withHint('claude', e);
+  }
+}
+
+// ---------- ChatGPT (Plus 구독, Codex) ----------
+
+const codex = new Codex({ env: subscriptionEnv() });
+
+async function codexOnce({ model, prompt, dir, sandboxMode, signal, timeoutMs }) {
+  const thread = codex.startThread({
+    model: model || undefined,
+    workingDirectory: dir,
+    skipGitRepoCheck: true,
+    sandboxMode,
+    approvalPolicy: 'never',
+    webSearchEnabled: false,
+  });
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  const onAbort = () => controller.abort();
+  signal?.addEventListener('abort', onAbort);
+  try {
+    return await thread.run(prompt, { signal: controller.signal });
+  } catch (e) {
+    throw withHint('openai', e);
+  } finally {
+    clearTimeout(timer);
+    signal?.removeEventListener('abort', onAbort);
+  }
+}
+
+async function codexChat({ model, system, messages }, signal) {
+  const prompt = [
+    system ? `# 지시사항\n${system}` : '',
+    '# 응답 규칙\n도구나 셸 명령을 쓰지 말고, 답변 텍스트만 작성하세요.',
+    `# 요청\n${transcript(messages)}`,
+  ]
+    .filter(Boolean)
+    .join('\n\n');
+  const dir = workDir();
+  try {
+    let turn;
+    let note = '';
+    try {
+      turn = await codexOnce({ model, prompt, dir, sandboxMode: 'read-only', signal, timeoutMs: CHAT_TIMEOUT_MS });
+    } catch (e) {
+      if (!model || !isModelError(e)) throw e;
+      turn = await codexOnce({ model: undefined, prompt, dir, sandboxMode: 'read-only', signal, timeoutMs: CHAT_TIMEOUT_MS });
+      note = `\n\n(모델 "${model}"을 쓸 수 없어 Codex 기본 모델로 답했습니다. 설정에서 모델 ID를 비우거나 확인하세요.)`;
+    }
+    const u = turn.usage || {};
+    return {
+      text: (turn.finalResponse || '') + note,
+      usage: { input: u.input_tokens || 0, output: (u.output_tokens || 0) + (u.reasoning_output_tokens || 0) },
+    };
+  } finally {
+    cleanup(dir);
+  }
+}
+
+function newestPng(dir, since) {
+  if (!existsSync(dir)) return null;
+  let best = null;
+  const walk = (d) => {
+    for (const name of readdirSync(d)) {
+      const p = join(d, name);
+      let s;
+      try {
+        s = statSync(p);
+      } catch {
+        continue;
+      }
+      if (s.isDirectory()) walk(p);
+      else if (/\.png$/i.test(name) && s.mtimeMs >= since && (!best || s.mtimeMs > best.t)) best = { p, t: s.mtimeMs };
+    }
+  };
+  walk(dir);
+  return best ? best.p : null;
+}
+
+async function codexImage({ prompt }, signal) {
+  const dir = workDir();
+  const started = Date.now() - 1000;
+  try {
+    const instructions = [
+      'Use the imagegen skill with the built-in image_gen tool.',
+      'Do not use any CLI fallback script and do not ask for or use OPENAI_API_KEY.',
+      'If the built-in tool is unavailable, stop and reply exactly: IMAGEGEN_UNAVAILABLE.',
+      'Make exactly one image_gen call. Use a portrait 2:3 aspect ratio.',
+      'Do not crop, resize, convert, or post-process the image.',
+      'Copy the generated PNG into the current working directory as image.png.',
+      'Reply with only the absolute path of image.png.',
+      '',
+      'PROMPT:',
+      prompt,
+    ].join('\n');
+    const turn = await codexOnce({
+      model: undefined,
+      prompt: instructions,
+      dir,
+      sandboxMode: 'workspace-write',
+      signal,
+      timeoutMs: IMAGE_TIMEOUT_MS,
+    });
+    if ((turn.finalResponse || '').includes('IMAGEGEN_UNAVAILABLE')) {
+      throw new Error('Codex에서 이미지 생성 도구를 쓸 수 없습니다. ChatGPT 유료 플랜 로그인 상태를 확인하세요.');
+    }
+    const file =
+      (existsSync(join(dir, 'image.png')) && join(dir, 'image.png')) ||
+      newestPng(dir, started) ||
+      newestPng(join(homedir(), '.codex', 'generated_images'), started);
+    if (!file) throw new Error('생성된 이미지를 찾지 못했습니다.');
+    const u = turn.usage || {};
+    return {
+      base64: readFileSync(file).toString('base64'),
+      usage: { input: u.input_tokens || 0, output: (u.output_tokens || 0) + (u.reasoning_output_tokens || 0) },
+    };
+  } finally {
+    cleanup(dir);
+  }
+}
+
+// ---------- HTTP ----------
+
+function authorized(req, url) {
+  const header = req.headers.authorization || '';
+  const given = header.startsWith('Bearer ') ? header.slice(7) : url.searchParams.get('token') || '';
+  const a = Buffer.from(given);
+  const b = Buffer.from(TOKEN);
+  return a.length === b.length && timingSafeEqual(a, b);
+}
+
+function readJson(req) {
+  return new Promise((resolve, reject) => {
+    let size = 0;
+    const chunks = [];
+    req.on('data', (c) => {
+      size += c.length;
+      if (size > MAX_BODY) {
+        reject(new Error('요청이 너무 큽니다.'));
+        req.destroy();
+      } else chunks.push(c);
+    });
+    req.on('end', () => {
+      try {
+        resolve(JSON.parse(Buffer.concat(chunks).toString('utf8') || '{}'));
+      } catch {
+        reject(new Error('JSON 형식이 아닙니다.'));
+      }
+    });
+    req.on('error', reject);
+  });
+}
+
+/**
+ * 오래 걸리는 작업 동안 연결이 끊기지 않도록 15초마다 공백을 보내고,
+ * 끝나면 JSON을 보냅니다. JSON 앞의 공백은 파싱에 영향이 없습니다.
+ * 이미 200을 보냈으므로 오류는 본문의 error 필드로 전달합니다.
+ */
+async function longJson(res, work) {
+  res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' });
+  const beat = setInterval(() => res.write(' '), HEARTBEAT_MS);
+  // 폰 연결이 끊기면 작업도 멈춰서 구독 한도를 아낍니다.
+  const gone = new AbortController();
+  res.on('close', () => {
+    if (!res.writableFinished) gone.abort();
+  });
+  try {
+    res.end(JSON.stringify(await work(gone.signal)));
+  } catch (e) {
+    console.error(e);
+    res.end(JSON.stringify({ error: { message: e instanceof Error ? e.message : String(e) } }));
+  } finally {
+    clearInterval(beat);
+  }
+}
+
+function send(res, status, body, type = 'application/json; charset=utf-8') {
+  res.writeHead(status, { 'Content-Type': type, 'Cache-Control': 'no-store' });
+  res.end(typeof body === 'string' ? body : JSON.stringify(body));
+}
+
+const server = http.createServer(async (req, res) => {
+  const url = new URL(req.url, 'http://localhost');
+  if (!authorized(req, url)) return send(res, 401, 'unauthorized', 'text/plain; charset=utf-8');
+
+  try {
+    if (req.method === 'GET' && url.pathname === '/') {
+      return send(res, 200, 'macmini server OK', 'text/plain; charset=utf-8');
+    }
+    if (req.method === 'GET' && url.pathname === '/v1/health') {
+      return send(res, 200, { ok: true, providers: ['claude', 'openai'] });
+    }
+    if (req.method === 'POST' && url.pathname === '/v1/chat') {
+      const body = await readJson(req);
+      const provider = body.provider === 'openai' ? 'openai' : 'claude';
+      console.log(`[chat] ${provider} ${body.model || '(기본 모델)'}`);
+      return longJson(res, (signal) => (provider === 'openai' ? codexChat(body, signal) : claudeChat(body, signal)));
+    }
+    if (req.method === 'POST' && url.pathname === '/v1/image') {
+      const body = await readJson(req);
+      if (!body.prompt) return send(res, 400, { error: { message: 'prompt가 필요합니다.' } });
+      console.log('[image] codex');
+      return longJson(res, (signal) => codexImage(body, signal));
+    }
+    return send(res, 404, { error: { message: '없는 주소입니다.' } });
+  } catch (e) {
+    return send(res, 400, { error: { message: e instanceof Error ? e.message : String(e) } });
+  }
+});
+
+server.requestTimeout = 0;
+server.listen(PORT, HOST, () => console.log(`AI 서버 실행 중: http://${HOST}:${PORT}`));

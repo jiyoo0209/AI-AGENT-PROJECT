@@ -11,6 +11,8 @@ const claude: RoleModel = { provider: 'claude', model: DEFAULT_CLAUDE_MODEL };
 
 export function defaultSettings(): Settings {
   return {
+    serverUrl: '',
+    serverToken: '',
     anthropicKey: '',
     openaiKey: '',
     imageModel: DEFAULT_IMAGE_MODEL,
@@ -31,6 +33,7 @@ export function defaultSettings(): Settings {
 const SETTINGS_KEY = 'settings.v1';
 const ANTHROPIC_KEY = 'anthropicKey';
 const OPENAI_KEY = 'openaiKey';
+const SERVER_TOKEN = 'serverToken';
 
 let current: Settings = defaultSettings();
 const listeners = new Set<() => void>();
@@ -61,6 +64,7 @@ export async function loadSettings(): Promise<void> {
     const raw = await AsyncStorage.getItem(SETTINGS_KEY);
     if (raw) {
       const saved = JSON.parse(raw) as Partial<Settings>;
+      base.serverUrl = saved.serverUrl ?? base.serverUrl;
       base.imageModel = saved.imageModel || base.imageModel;
       base.stepApproval = saved.stepApproval ?? base.stepApproval;
       base.monthlyTokenBudget = { ...base.monthlyTokenBudget, ...saved.monthlyTokenBudget };
@@ -73,6 +77,7 @@ export async function loadSettings(): Promise<void> {
     }
     base.anthropicKey = (await SecureStore.getItemAsync(ANTHROPIC_KEY)) ?? '';
     base.openaiKey = (await SecureStore.getItemAsync(OPENAI_KEY)) ?? '';
+    base.serverToken = (await SecureStore.getItemAsync(SERVER_TOKEN)) ?? '';
   } catch {
     // keep defaults
   }
@@ -81,10 +86,18 @@ export async function loadSettings(): Promise<void> {
 }
 
 export async function saveSettings(next: Settings): Promise<void> {
-  const { anthropicKey, openaiKey, ...rest } = next;
-  await AsyncStorage.setItem(SETTINGS_KEY, JSON.stringify(rest));
+  const { anthropicKey, openaiKey, serverToken, ...rest } = next;
+  const serverUrl = rest.serverUrl.trim().replace(/\/+$/, '');
+  await AsyncStorage.setItem(SETTINGS_KEY, JSON.stringify({ ...rest, serverUrl }));
   await SecureStore.setItemAsync(ANTHROPIC_KEY, anthropicKey.trim());
   await SecureStore.setItemAsync(OPENAI_KEY, openaiKey.trim());
-  current = { ...next, anthropicKey: anthropicKey.trim(), openaiKey: openaiKey.trim() };
+  await SecureStore.setItemAsync(SERVER_TOKEN, serverToken.trim());
+  current = {
+    ...next,
+    serverUrl,
+    serverToken: serverToken.trim(),
+    anthropicKey: anthropicKey.trim(),
+    openaiKey: openaiKey.trim(),
+  };
   emit();
 }

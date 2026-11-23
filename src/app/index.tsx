@@ -39,7 +39,7 @@ export default function Home() {
   const busy = useBusy();
   const [request, setRequest] = useState('');
 
-  const needsKeys = !settings.anthropicKey && !settings.openaiKey;
+  const needsKeys = !settings.serverUrl && !settings.anthropicKey && !settings.openaiKey;
   const phase = PHASE[project.phase];
   const pending = project.tasks.filter((t) => t.status === 'pending').length;
   const hasFailed = project.tasks.some((t) => t.status === 'failed');
@@ -73,7 +73,7 @@ export default function Home() {
           <Pressable onPress={() => router.push('/settings')}>
             <Card style={styles.warn}>
               <Text style={styles.warnText}>
-                설정에서 Claude 또는 OpenAI API 키를 입력해야 AI 팀원이 일할 수 있습니다. 눌러서 이동
+                설정에서 맥미니 서버 주소(또는 API 키)를 입력해야 AI 팀원이 일할 수 있습니다. 눌러서 이동
               </Text>
             </Card>
           </Pressable>
