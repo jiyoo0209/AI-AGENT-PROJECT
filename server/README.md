@@ -32,6 +32,27 @@ pm2 restart ai-server
 
 프로젝트, 채팅, 산출물 파일, 설정은 `~/.my-office`에 저장됩니다. 다른 폴더를 쓰려면 `DATA_DIR` 환경 변수를 주세요. 서버를 옮길 때(예: VPS) 이 폴더를 복사하면 그대로 이어집니다.
 
+## 문서·화면 (Word, Excel, PPT, PDF 미리보기, 화면 캡처)
+
+팀원은 Markdown으로 쓰고, 파일명 확장자(.docx, .xlsx, .pptx)에 따라 서버가 Word·Excel·PowerPoint 파일을 만듭니다. 앱에서는 PDF로 바꾼 페이지 이미지로 보여 줍니다. 퍼블리셔 HTML 화면은 앱 안에서 바로 실행되고, 서버가 Chrome으로 캡처해 썸네일과 화면설계서 PPT에 넣습니다.
+
+필요한 프로그램 (맥미니에 한 번 설치):
+
+```
+brew install pandoc poppler
+brew install --cask libreoffice
+```
+
+화면 캡처는 맥미니에 설치된 Google Chrome을 씁니다. Chrome이 없으면 `cd server && npx playwright-core install chromium`.
+없는 프로그램이 있으면 그 기능만 꺼지고, 서버를 켤 때 로그(`pm2 logs ai-server`)에 `[docs]`로 알려 줍니다.
+
+| 주소 | 내용 |
+|---|---|
+| `GET /v1/files/:id/page/:n` (`?v=thumb`) | 문서 미리보기 n쪽 이미지 |
+| `GET /v1/files/:id/pdf` | 문서 PDF |
+| `GET /v1/files/:id?v=source` | 문서의 Markdown 원본 |
+| `GET /site/<비밀 값>/<역할>/<파일>` | 화면 실행용 (앱의 웹 화면이 씀, 비밀 값은 `/v1/state`의 `siteBase`) |
+
 ## 결재 알림 (선택: Firebase 푸시)
 
 - 기본: 앱이 백그라운드에서 15분 이상 간격으로 서버를 확인해 알림을 띄웁니다. 늦게 올 수 있습니다.

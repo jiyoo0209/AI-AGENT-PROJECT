@@ -47,6 +47,7 @@ export default function RootLayout() {
         <Stack.Screen name="files" options={{ title: '전체 산출물' }} />
         <Stack.Screen name="room/[role]" options={{ title: '채팅방' }} />
         <Stack.Screen name="viewer/[id]" options={{ title: '산출물 보기' }} />
+        <Stack.Screen name="site/[id]" options={{ title: '화면 실행' }} />
       </Stack>
     </SafeAreaProvider>
   );

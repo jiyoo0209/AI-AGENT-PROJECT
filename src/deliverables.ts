@@ -22,10 +22,43 @@ export function fileHeaders(): Record<string, string> {
   return authHeaders(getSettings());
 }
 
+export type DocKind = 'docx' | 'xlsx' | 'pptx';
+
+/** Word·Excel·PPT 산출물이면 종류를, 아니면 null */
+export function docKind(d: Deliverable): DocKind | null {
+  const ext = d.name.split('.').pop()?.toLowerCase();
+  return ext === 'docx' || ext === 'xlsx' || ext === 'pptx' ? ext : null;
+}
+
+export const isScreen = (d: Deliverable) => d.mime === 'text/html';
+
+/** 미리보기(문서 첫 페이지, 화면 캡처, 이미지)가 있어 썸네일을 보여 줄 수 있는지 */
+export function hasThumb(d: Deliverable): boolean {
+  if (d.preview) return d.preview.status === 'ready';
+  return d.isBinary && d.mime.startsWith('image/');
+}
+
+/** 문서 미리보기의 n번째 페이지 이미지 */
+export function pageSource(d: Deliverable, n: number, thumb = false) {
+  return { uri: `${serverBase(getSettings())}/v1/files/${d.id}/page/${n}${thumb ? '?v=thumb' : ''}`, headers: fileHeaders() };
+}
+
+let siteBase = '';
+/** 서버가 알려 준 화면 실행 주소의 앞부분 (/site/...) */
+export function setSiteBase(base: string | undefined) {
+  if (base) siteBase = base;
+}
+
+/** 퍼블리셔 화면을 앱 안에서 실행할 주소. 아직 서버와 연결 전이면 null */
+export function siteUrl(d: Deliverable): string | null {
+  return siteBase ? `${serverBase(getSettings())}${siteBase}/${d.role}/${encodeURIComponent(d.name)}` : null;
+}
+
 export async function readText(d: Deliverable): Promise<string> {
   let file: File;
   try {
-    file = await localCopy(d);
+    // Word·Excel·PPT는 팀원이 쓴 Markdown 원본을 읽습니다.
+    file = await localCopy(d, d.source ? 'source' : undefined);
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
     throw new Error(/404/.test(msg) ? '서버에서 파일을 찾지 못했어요.' : '서버에 연결하지 못해 파일을 열 수 없어요.');
@@ -35,12 +68,22 @@ export async function readText(d: Deliverable): Promise<string> {
 }
 
 /** 서버의 파일을 기기 캐시에 내려받습니다. 한 번 받은 파일은 다시 받지 않습니다. */
-async function localCopy(d: Deliverable): Promise<File> {
+async function localCopy(d: Deliverable, kind?: 'pdf' | 'source'): Promise<File> {
   const dir = new Directory(Paths.cache, 'deliverables', d.id);
   if (!dir.exists) dir.create({ intermediates: true, idempotent: true });
-  const file = new File(dir, d.name);
-  if (file.exists && file.size === d.size) return file;
-  return File.downloadFileAsync(fileUrl(d), file, { headers: fileHeaders(), idempotent: true });
+  const base = d.name.replace(/\.\w+$/, '');
+  const name = kind === 'pdf' ? `${base}.pdf` : kind === 'source' ? `${base}.md` : d.name;
+  const file = new File(dir, name);
+  if (file.exists && (kind ? file.size > 0 : file.size === d.size)) return file;
+  const url = kind === 'pdf' ? `${fileUrl(d)}/pdf` : kind === 'source' ? `${fileUrl(d)}?v=source` : fileUrl(d);
+  return File.downloadFileAsync(url, file, { headers: fileHeaders(), idempotent: true });
+}
+
+/** 문서를 PDF로 공유합니다 (다른 앱으로 열기). */
+export async function sharePdf(d: Deliverable): Promise<void> {
+  if (!(await Sharing.isAvailableAsync())) throw new Error('이 기기에서는 공유를 사용할 수 없습니다.');
+  const file = await localCopy(d, 'pdf');
+  await Sharing.shareAsync(file.uri, { mimeType: 'application/pdf', dialogTitle: file.name });
 }
 
 export async function shareDeliverable(d: Deliverable): Promise<void> {

@@ -1,7 +1,7 @@
 import { Image } from 'expo-image';
 import { router } from 'expo-router';
 import { Alert, Pressable, StyleSheet, Text, View } from 'react-native';
-import { downloadDeliverable, imageSource, shareDeliverable } from './deliverables';
+import { downloadDeliverable, hasThumb, imageSource, isScreen, shareDeliverable, sharePdf } from './deliverables';
 import { roleInfo } from './roles';
 import { Deliverable } from './types';
 import { Button, colors } from './ui';
@@ -11,6 +11,14 @@ export async function shareWithAlert(d: Deliverable) {
     await shareDeliverable(d);
   } catch (e) {
     Alert.alert('공유 실패', e instanceof Error ? e.message : String(e));
+  }
+}
+
+export async function sharePdfWithAlert(d: Deliverable) {
+  try {
+    await sharePdf(d);
+  } catch (e) {
+    Alert.alert('PDF 공유 실패', e instanceof Error ? e.message : String(e));
   }
 }
 
@@ -30,8 +38,8 @@ export function FileCard({ d, showRole }: { d: Deliverable; showRole?: boolean }
   return (
     <View style={styles.card}>
       <Pressable style={styles.info} onPress={() => router.push(`/viewer/${d.id}`)}>
-        {d.isBinary ? (
-          <Image source={imageSource(d, 'thumb')} cachePolicy="disk" contentFit="cover" style={styles.ext} />
+        {hasThumb(d) ? (
+          <Image source={imageSource(d, 'thumb')} cachePolicy="disk" contentFit="cover" contentPosition="top" style={styles.ext} />
         ) : (
           <View style={styles.ext}>
             <Text style={styles.extText}>{ext.slice(0, 4)}</Text>
@@ -48,6 +56,7 @@ export function FileCard({ d, showRole }: { d: Deliverable; showRole?: boolean }
         </View>
       </Pressable>
       <View style={styles.actions}>
+        {isScreen(d) && <Button small title="▶ 실행" onPress={() => router.push(`/site/${d.id}`)} />}
         <Button small variant="secondary" title="보기" onPress={() => router.push(`/viewer/${d.id}`)} />
         <Button small variant="secondary" title="공유" onPress={() => shareWithAlert(d)} />
         <Button small title="다운로드" onPress={() => downloadWithAlert(d)} />

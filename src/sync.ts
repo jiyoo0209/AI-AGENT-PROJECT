@@ -4,7 +4,7 @@
 import { Image } from 'expo-image';
 import { AppState } from 'react-native';
 import { useSyncExternalStore } from 'react';
-import { imageSource } from './deliverables';
+import { docKind, imageSource, pageSource, setSiteBase } from './deliverables';
 import { callServer, refreshLimits } from './llm';
 import { markAttentionSeen, registerPush } from './notify';
 import { getSettings, subscribeSettings } from './settings';
@@ -25,6 +25,7 @@ interface ServerState {
   busy: Partial<Record<RoleId, boolean>>;
   attention: { id: string; title: string; body: string; at: number } | null;
   usage: { month: string; byProvider: Record<Provider, MonthlyUsage> };
+  siteBase?: string;
 }
 
 export interface SyncStatus {
@@ -58,15 +59,21 @@ let failures = 0;
 let generation = 0;
 let controller: AbortController | undefined;
 
-/** 새 시안 이미지는 열기 전에 미리 받아 둡니다. */
+/** 새 시안 이미지, 문서 앞 페이지, 화면 캡처는 열기 전에 미리 받아 둡니다. */
 const prefetched = new Set<string>();
 function prefetchImages(p: Project) {
   for (const d of p.deliverables) {
-    if (!d.isBinary || prefetched.has(d.id)) continue;
-    prefetched.add(d.id);
-    for (const v of ['thumb', 'preview'] as const) {
-      const src = imageSource(d, v);
-      Image.prefetch(src.uri, { headers: src.headers, cachePolicy: 'disk' }).catch(() => prefetched.delete(d.id));
+    const ready = d.preview?.status === 'ready';
+    const isImage = d.isBinary && d.mime.startsWith('image/') && !d.preview;
+    if (!ready && !isImage) continue;
+    const key = `${d.id}:${d.preview?.status ?? 'image'}`;
+    if (prefetched.has(key)) continue;
+    prefetched.add(key);
+    const sources = docKind(d)
+      ? [imageSource(d, 'thumb'), ...Array.from({ length: Math.min(3, d.preview?.pages ?? 0) }, (_, i) => pageSource(d, i + 1))]
+      : [imageSource(d, 'thumb'), imageSource(d, 'preview')];
+    for (const src of sources) {
+      Image.prefetch(src.uri, { headers: src.headers, cachePolicy: 'disk' }).catch(() => prefetched.delete(key));
     }
   }
 }
@@ -75,6 +82,7 @@ function apply(s: ServerState) {
   rev = s.rev;
   projectStore.set(() => s.project);
   busyStore.set(() => s.busy);
+  setSiteBase(s.siteBase);
   prefetchImages(s.project);
   if (s.usage) setMonthlyUsage(s.usage.month, s.usage.byProvider);
   // 앱을 보고 있으면 알림이 따로 필요 없습니다.

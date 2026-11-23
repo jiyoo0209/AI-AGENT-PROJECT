@@ -21,6 +21,10 @@ export interface Deliverable {
   size: number;
   taskId?: string;
   createdAt: number;
+  /** Word·Excel·PPT 산출물의 Markdown 원본 (서버 기준 경로). 팀원끼리는 이 원본을 참고합니다. */
+  source?: string;
+  /** 앱에서 볼 미리보기. 문서는 PDF 페이지 이미지, HTML 화면은 캡처 이미지 */
+  preview?: { status: 'pending' | 'ready' | 'failed'; pages?: number; error?: string };
 }
 
 export interface ChatMessage {

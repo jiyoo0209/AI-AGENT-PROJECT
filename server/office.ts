@@ -4,8 +4,9 @@
 
 import { randomBytes } from 'node:crypto';
 import { existsSync, mkdirSync, readFileSync, renameSync, statSync, writeFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { basename, join } from 'node:path';
 import { mimeFor, parseReply } from '../src/reply';
+import { docKind, type Documents } from './documents';
 import { isWorkerRole, roleInfo, ROLES, systemPrompt } from '../src/roles';
 import type { ChatMessage, Deliverable, Project, ProjectPhase, Provider, RoleId, RoleModel, Task } from '../src/types';
 
@@ -105,6 +106,8 @@ export function createOffice(opts: {
   notify: (a: Attention) => void;
   /** 이미지가 저장되면 불립니다 (미리보기를 미리 만들어 둠). */
   onImageSaved?: (id: string) => void;
+  /** Word·Excel·PPT 만들기와 미리보기. 없으면 Markdown 그대로 둡니다. */
+  docs?: Documents;
 }) {
   const { dataDir } = opts;
   const filesDir = join(dataDir, 'files');
@@ -247,8 +250,90 @@ export function createOffice(opts: {
   }
 
   function readText(d: Deliverable): string {
-    const text = readFileSync(filePath(d), 'utf8');
+    const text = readFileSync(d.source ? join(dataDir, d.source) : filePath(d), 'utf8');
     return text.startsWith('﻿') ? text.slice(1) : text;
+  }
+
+  // ---------- Word·Excel·PPT와 미리보기 ----------
+
+  function patchDeliverable(id: string, patch: Partial<Deliverable>) {
+    if (!project.deliverables.some((d) => d.id === id)) return;
+    setProject((p) => ({ ...p, deliverables: p.deliverables.map((d) => (d.id === id ? { ...d, ...patch } : d)) }));
+  }
+
+  /** 문서 안의 ![](파일명)을 실제 이미지 경로로 바꿉니다. HTML 화면은 캡처해서 넣습니다. */
+  async function resolveImage(ref: string): Promise<string | null> {
+    const name = decodeURIComponent(basename(ref.split(/[?#]/)[0]));
+    const candidates = project.deliverables.filter((d) => d.name === name || d.name === name.replace(/\s+/g, '_'));
+    const d = candidates.sort((a, b) => b.createdAt - a.createdAt)[0];
+    if (!d) return null;
+    if (d.mime.startsWith('image/') && d.mime !== 'image/svg+xml') return filePath(d);
+    if (d.mime === 'text/html' && opts.docs) return opts.docs.screenshot(d.id, filePath(d));
+    return null;
+  }
+
+  function previewLater(d: Deliverable) {
+    const docs = opts.docs;
+    if (!docs) return;
+    const job = docKind(d.name) ? docs.preview(d.id, filePath(d)) : docs.screenshot(d.id, filePath(d)).then((p) => (p ? 1 : Promise.reject(new Error('화면을 캡처하지 못했어요.'))));
+    job.then(
+      (pages) => patchDeliverable(d.id, { preview: { status: 'ready', pages } }),
+      (e) => {
+        console.error(`[docs] ${d.name} 미리보기 실패:`, errorText(e));
+        patchDeliverable(d.id, { preview: { status: 'failed', error: errorText(e).slice(0, 200) } });
+      },
+    );
+  }
+
+  /** Markdown 원본으로 Word·Excel·PPT 산출물을 만듭니다. */
+  async function saveDocument(role: RoleId, name: string, markdown: string, taskId?: string): Promise<Deliverable> {
+    const kind = docKind(name)!;
+    const docs = opts.docs;
+    if (!docs) return saveText(role, name.replace(/\.\w+$/, '.md'), markdown, taskId);
+    const srcDir = join(filesDir, role, '.src');
+    mkdirSync(srcDir, { recursive: true });
+    writeFileSync(join(srcDir, `${name}.md`), markdown);
+    const out = join(filesDir, role, name);
+    await docs.build(kind, markdown, out, {
+      title: name.replace(/\.\w+$/, ''),
+      resourceDirs: ROLES.map((r) => join(filesDir, r.id)),
+      resolveImage,
+    });
+    const d = upsert({
+      id: newId(),
+      role,
+      name,
+      mime: mimeFor(name),
+      uri: `files/${role}/${name}`,
+      isBinary: true,
+      size: statSync(out).size,
+      taskId,
+      createdAt: Date.now(),
+      source: `files/${role}/.src/${name}.md`,
+      preview: docs.canPreview() ? { status: 'pending' } : { status: 'failed', error: 'PDF 미리보기 도구가 설치되지 않았어요.' },
+    });
+    if (docs.canPreview()) previewLater(d);
+    return d;
+  }
+
+  /** 새 화면·이미지가 생기면, 그 파일을 넣은 문서(예: 화면설계서.pptx)를 다시 만듭니다. */
+  async function refreshDependents(names: string[]) {
+    if (!opts.docs || !names.length) return;
+    for (const d of project.deliverables.filter((x) => x.source && docKind(x.name))) {
+      let md = '';
+      try {
+        md = readFileSync(join(dataDir, d.source!), 'utf8');
+      } catch {
+        continue;
+      }
+      if (!names.some((n) => md.includes(n))) continue;
+      try {
+        await saveDocument(d.role, d.name, md, d.taskId);
+        console.log(`[docs] ${d.name}에 새 화면을 반영했어요.`);
+      } catch (e) {
+        console.error(`[docs] ${d.name} 다시 만들기 실패:`, errorText(e));
+      }
+    }
   }
 
   // ---------- 에이전트 ----------
@@ -265,8 +350,8 @@ export function createOffice(opts: {
           p.tasks.map((t, i) => `${i + 1}. (${roleInfo(t.role).name}) ${t.title} — ${statusLabel(t.status)}`).join('\n'),
       );
     }
-    const texts = p.deliverables.filter((d) => !d.isBinary).sort((a, b) => b.createdAt - a.createdAt);
-    const images = p.deliverables.filter((d) => d.isBinary);
+    const texts = p.deliverables.filter((d) => !d.isBinary || d.source).sort((a, b) => b.createdAt - a.createdAt);
+    const images = p.deliverables.filter((d) => d.isBinary && !d.source);
     let budget = MAX_CONTEXT_CHARS;
     const blocks: string[] = [];
     for (const d of texts) {
@@ -317,13 +402,38 @@ export function createOffice(opts: {
     const parsed = parseReply(reply);
     const saved: Deliverable[] = [];
     const notes: string[] = [];
+    const screens: Deliverable[] = [];
     for (const f of parsed.files) {
       try {
-        saved.push(saveText(role, f.name, f.content, taskId));
+        if (docKind(f.name)) {
+          setBusy(role, true);
+          try {
+            saved.push(await saveDocument(role, f.name, f.content, taskId));
+          } finally {
+            setBusy(role, false);
+          }
+        } else {
+          const d = saveText(role, f.name, f.content, taskId);
+          if (d.mime === 'text/html' && opts.docs) {
+            patchDeliverable(d.id, { preview: { status: 'pending' } });
+            screens.push(d);
+          }
+          saved.push(d);
+        }
       } catch (e) {
-        notes.push(`(${f.name} 저장 실패: ${errorText(e)})`);
+        // 변환에 실패해도 내용은 Markdown으로 남깁니다.
+        notes.push(`(${f.name} 만들기 실패: ${errorText(e)})`);
+        if (docKind(f.name)) {
+          try {
+            saved.push(saveText(role, f.name.replace(/\.\w+$/, '.md'), f.content, taskId));
+          } catch {
+            // 무시
+          }
+        }
       }
     }
+    // CSS·JS까지 모두 저장한 뒤에 화면을 캡처합니다.
+    for (const d of screens) previewLater(d);
     for (let i = 0; i < parsed.imagePrompts.length; i++) {
       setBusy(role, true);
       try {
@@ -340,6 +450,7 @@ export function createOffice(opts: {
       .filter(Boolean)
       .join('\n\n');
     addMessage({ role, from: 'agent', text, files: saved.map((d) => d.id) });
+    await refreshDependents(saved.filter((d) => !d.source).map((d) => d.name));
     return parsed;
   }
 
@@ -404,7 +515,14 @@ export function createOffice(opts: {
     } else if (isNewProject) {
       setPhase('idle');
     }
-    for (const f of parsed.files) saveText('pm', f.name, f.content);
+    for (const f of parsed.files) {
+      try {
+        if (docKind(f.name)) await saveDocument('pm', f.name, f.content);
+        else saveText('pm', f.name, f.content);
+      } catch (e) {
+        console.error('[office] PM 파일 저장 실패', errorText(e));
+      }
+    }
     addMessage({ role: 'pm', from: 'agent', text: text || '(빈 응답)' });
     if (newTasks.length) alert('계획 결재가 필요해요', `PM이 작업 ${newTasks.length}개를 계획했어요. 승인하면 시작해요.`);
     return newTasks.length;
@@ -622,12 +740,27 @@ export function createOffice(opts: {
     },
 
     /** 산출물 파일 (없으면 null) */
-    file(id: string): { path: string; mime: string; name: string; size: number } | null {
+    file(id: string): { path: string; mime: string; name: string; size: number; deliverable: Deliverable } | null {
       const d = project.deliverables.find((x) => x.id === id);
       if (!d) return null;
       const path = filePath(d);
       if (!existsSync(path)) return null;
-      return { path, mime: d.mime, name: d.name, size: statSync(path).size };
+      return { path, mime: d.mime, name: d.name, size: statSync(path).size, deliverable: d };
+    },
+
+    /** 퍼블리셔 등 역할 폴더의 파일 (화면 실행용). 없으면 null */
+    siteFile(role: string, sub: string): string | null {
+      if (!ROLES.some((r) => r.id === role)) return null;
+      // 파일 이름은 저장할 때 / 를 _ 로 바꾸므로 같은 규칙으로 찾습니다 (css/style.css → css_style.css).
+      const name = sub
+        .split('/')
+        .filter((x) => x && x !== '.' && x !== '..')
+        .join('_')
+        .replace(/[\\:*?"<>|]+/g, '_')
+        .replace(/\s+/g, '_');
+      if (!name || name.startsWith('.')) return null;
+      const path = join(filesDir, role, name);
+      return existsSync(path) ? path : null;
     },
   };
 }

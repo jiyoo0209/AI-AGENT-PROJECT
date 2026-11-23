@@ -5,7 +5,7 @@
 
 import { query } from '@anthropic-ai/claude-agent-sdk';
 import { Codex } from '@openai/codex-sdk';
-import { randomUUID, timingSafeEqual } from 'node:crypto';
+import { createHmac, randomUUID, timingSafeEqual } from 'node:crypto';
 import { createReadStream, existsSync, mkdirSync, openSync, readFileSync, readSync, readdirSync, renameSync, rmSync, statSync, closeSync } from 'node:fs';
 import http from 'node:http';
 import { homedir, tmpdir } from 'node:os';
@@ -404,12 +404,15 @@ mkdirSync(DATA_DIR, { recursive: true });
 // office.ts는 앱과 같은 역할 정의(src/roles.ts)를 쓰므로 TypeScript로 불러옵니다.
 registerTypeScript();
 const { createOffice } = await import('./office.ts');
+const { createDocuments } = await import('./documents.ts');
+const docs = createDocuments(DATA_DIR);
 const push = createPush({
   dataDir: DATA_DIR,
   serviceAccountPath: process.env.FIREBASE_SERVICE_ACCOUNT || join(DATA_DIR, 'firebase-service-account.json'),
 });
 const office = createOffice({
   dataDir: DATA_DIR,
+  docs,
   onImageSaved: (id) => {
     for (const v of ['thumb', 'preview']) imageVariant(id, v).catch(() => {});
   },
@@ -529,8 +532,52 @@ function send(res, status, body, type = 'application/json; charset=utf-8') {
   res.end(text);
 }
 
+// 퍼블리셔 화면 실행 주소: /site/<비밀 값>/<역할>/<파일>
+// 앱의 웹 화면(WebView)은 CSS·JS·이미지를 불러올 때 토큰 헤더를 붙일 수 없어서, 주소 안의 비밀 값으로 확인합니다.
+const SITE_KEY = createHmac('sha256', TOKEN).update('my-office-site').digest('hex').slice(0, 32);
+const SITE_BASE = `/site/${SITE_KEY}`;
+
+function textType(mime) {
+  return /^text\/|\/json$|\/javascript$|[+/]xml$/.test(mime) ? `${mime}; charset=utf-8` : mime;
+}
+
+function serveSite(req, res, url) {
+  const m = url.pathname.match(/^\/site\/([0-9a-f]{32})\/([a-z]+)\/(.+)$/);
+  const key = Buffer.from(m?.[1] || '');
+  if (!m || key.length !== SITE_KEY.length || !timingSafeEqual(key, Buffer.from(SITE_KEY))) {
+    res.writeHead(404, { 'Content-Type': 'text/plain; charset=utf-8' });
+    return res.end('not found');
+  }
+  let sub = m[3];
+  try {
+    sub = decodeURIComponent(sub);
+  } catch {
+    // 그대로 사용
+  }
+  const path = office.siteFile(m[2], sub);
+  if (!path) {
+    res.writeHead(404, { 'Content-Type': 'text/html; charset=utf-8' });
+    return res.end(`<meta name="viewport" content="width=device-width"><p style="font-family:sans-serif;padding:24px">아직 없는 화면이에요: ${sub.replace(/[<>&]/g, '')}</p>`);
+  }
+  const ext = path.split('.').pop().toLowerCase();
+  const types = { html: 'text/html', htm: 'text/html', css: 'text/css', js: 'text/javascript', mjs: 'text/javascript', json: 'application/json', svg: 'image/svg+xml', png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg', webp: 'image/webp', gif: 'image/gif' };
+  // 퍼블리셔가 같은 파일을 고치면 바로 보여야 하므로 캐시하지 않습니다.
+  res.writeHead(200, { 'Content-Type': textType(types[ext] || 'text/plain'), 'Content-Length': statSync(path).size, 'Cache-Control': 'no-cache' });
+  if (req.method === 'HEAD') return res.end();
+  return createReadStream(path).pipe(res);
+}
+
+/** 미리보기 이미지(WebP)를 보냅니다. 파일이 없으면 false */
+function sendWebp(res, path) {
+  if (!path || !existsSync(path)) return false;
+  res.writeHead(200, { 'Content-Type': 'image/webp', 'Content-Length': statSync(path).size, 'Cache-Control': 'private, max-age=31536000, immutable' });
+  createReadStream(path).pipe(res);
+  return true;
+}
+
 const server = http.createServer(async (req, res) => {
   const url = new URL(req.url, 'http://localhost');
+  if ((req.method === 'GET' || req.method === 'HEAD') && url.pathname.startsWith('/site/')) return serveSite(req, res, url);
   if (!authorized(req, url)) return send(res, 401, 'unauthorized', 'text/plain; charset=utf-8');
 
   try {
@@ -554,7 +601,7 @@ const server = http.createServer(async (req, res) => {
       const since = Number(url.searchParams.get('since') || 0);
       const waitMs = Math.max(0, Math.min(Number(url.searchParams.get('wait') || 0), 30)) * 1000;
       const s = await office.waitForChange(since, waitMs);
-      return send(res, 200, { ...s, settings: office.settings(), push: push.enabled() });
+      return send(res, 200, { ...s, settings: office.settings(), push: push.enabled(), siteBase: SITE_BASE });
     }
     if (req.method === 'POST' && url.pathname === '/v1/action') {
       const body = await readJson(req);
@@ -569,23 +616,40 @@ const server = http.createServer(async (req, res) => {
       const body = await readJson(req);
       return send(res, 200, { ok: true, push: push.register(body.token) });
     }
-    const fileMatch = req.method === 'GET' && url.pathname.match(/^\/v1\/files\/([A-Za-z0-9_-]+)$/);
+    // /v1/files/<id>[/pdf | /page/<n>][?v=thumb|preview|source]
+    const fileMatch = req.method === 'GET' && url.pathname.match(/^\/v1\/files\/([A-Za-z0-9_-]+)(?:\/(pdf|page)(?:\/(\d+))?)?$/);
     if (fileMatch) {
-      const f = office.file(fileMatch[1]);
+      const [, id, sub, pageNo] = fileMatch;
+      const f = office.file(id);
       if (!f) return send(res, 404, { error: { message: '파일이 없습니다.' } });
       // 산출물은 바뀔 때마다 새 id를 받으므로, 같은 주소의 내용은 바뀌지 않습니다. 폰이 오래 캐시해도 됩니다.
       const cache = 'private, max-age=31536000, immutable';
       const variant = url.searchParams.get('v');
-      const small = variant ? await imageVariant(fileMatch[1], variant).catch(() => null) : null;
+      const d = f.deliverable;
+      if (sub === 'pdf') {
+        const pdf = docs.pdfPath(id);
+        if (!existsSync(pdf)) return send(res, 404, { error: { message: 'PDF가 아직 없어요.' } });
+        res.writeHead(200, { 'Content-Type': 'application/pdf', 'Content-Length': statSync(pdf).size, 'Cache-Control': cache });
+        return createReadStream(pdf).pipe(res);
+      }
+      if (sub === 'page') {
+        if (sendWebp(res, docs.pagePath(id, Number(pageNo || 1), variant === 'thumb'))) return;
+        return send(res, 404, { error: { message: '미리보기가 아직 없어요.' } });
+      }
+      if (variant === 'source' && d.source) {
+        const src = join(DATA_DIR, d.source);
+        if (existsSync(src)) return send(res, 200, readFileSync(src, 'utf8'), 'text/markdown; charset=utf-8');
+      }
+      // 문서·HTML 화면의 썸네일은 첫 페이지(캡처) 이미지입니다.
+      if ((variant === 'thumb' || variant === 'preview') && d.preview?.status === 'ready') {
+        if (sendWebp(res, docs.pagePath(id, 1, variant === 'thumb'))) return;
+      }
+      const small = variant ? await imageVariant(id, variant).catch(() => null) : null;
       if (small) {
         res.writeHead(200, { 'Content-Type': 'image/webp', 'Content-Length': statSync(small).size, 'Cache-Control': cache });
         return createReadStream(small).pipe(res);
       }
-      res.writeHead(200, {
-        'Content-Type': f.mime.startsWith('image/') ? f.mime : `${f.mime}; charset=utf-8`,
-        'Content-Length': f.size,
-        'Cache-Control': cache,
-      });
+      res.writeHead(200, { 'Content-Type': textType(f.mime), 'Content-Length': f.size, 'Cache-Control': cache });
       return createReadStream(f.path).pipe(res);
     }
     if (req.method === 'POST' && url.pathname === '/v1/image') {
