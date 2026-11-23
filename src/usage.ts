@@ -80,20 +80,12 @@ export function useUsage(): UsageState {
   );
 }
 
-export function recordUsage(provider: Provider, input: number, output: number) {
+/** 이번 달 사용량은 서버가 셉니다 (AI 팀이 서버에서 일하므로). */
+export function setMonthlyUsage(month: string, byProvider: Record<Provider, MonthlyUsage>) {
+  if (month !== thisMonth()) return;
   const s = current();
-  const prev = s.byProvider[provider];
-  set({
-    ...s,
-    byProvider: {
-      ...s.byProvider,
-      [provider]: {
-        input: prev.input + (input || 0),
-        output: prev.output + (output || 0),
-        requests: prev.requests + 1,
-      },
-    },
-  });
+  if (JSON.stringify(s.byProvider) === JSON.stringify(byProvider)) return;
+  set({ ...s, byProvider });
 }
 
 /** 맥미니 서버가 알려준 구독 한도를 기록합니다. null이면 이번에 못 읽은 것이므로 이전 값을 둡니다. */

@@ -40,6 +40,17 @@ jobs:
       - name: Typecheck
         run: npx tsc --noEmit
 
+      - name: Add Firebase config for push notifications (optional)
+        env:
+          GOOGLE_SERVICES_JSON: ${{ secrets.GOOGLE_SERVICES_JSON }}
+        run: |
+          if [ -n "$GOOGLE_SERVICES_JSON" ]; then
+            printf '%s' "$GOOGLE_SERVICES_JSON" > google-services.json
+            echo "푸시 알림 켜짐"
+          else
+            echo "GOOGLE_SERVICES_JSON 없음: 백그라운드 확인 알림만 사용"
+          fi
+
       - name: Generate native Android project
         run: npx expo prebuild --platform android --no-install
         env:

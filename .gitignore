@@ -39,3 +39,6 @@ yarn-error.*
 # generated native folders
 /ios
 /android
+
+# Firebase 설정 (GitHub Secrets로 넣습니다)
+google-services.json

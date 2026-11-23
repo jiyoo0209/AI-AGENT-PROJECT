@@ -66,6 +66,13 @@ function emit() {
   listeners.forEach((l) => l());
 }
 
+export function subscribeSettings(l: () => void): () => void {
+  listeners.add(l);
+  return () => {
+    listeners.delete(l);
+  };
+}
+
 export function getSettings(): Settings {
   return current;
 }

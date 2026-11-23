@@ -1,14 +1,17 @@
-// AI 프로젝트매니저 맥미니 서버
-// 폰 앱의 요청을 받아 Claude Pro(Claude Agent SDK)와 ChatGPT Plus(Codex SDK) 구독으로 처리합니다.
+// 나만의사무실 서버 (맥미니 또는 VPS)
+// Claude Pro(Claude Agent SDK)와 ChatGPT Plus(Codex SDK) 구독으로 AI 팀을 서버에서 돌립니다.
+// 폰 앱이 꺼져 있어도 작업을 이어가고, 결재가 필요하면 푸시 알림을 보냅니다.
 // API 키를 쓰지 않도록 ANTHROPIC_API_KEY / OPENAI_API_KEY / CODEX_API_KEY 는 하위 프로세스에 넘기지 않습니다.
 
 import { query } from '@anthropic-ai/claude-agent-sdk';
 import { Codex } from '@openai/codex-sdk';
 import { randomUUID, timingSafeEqual } from 'node:crypto';
-import { existsSync, mkdirSync, openSync, readFileSync, readSync, readdirSync, rmSync, statSync, closeSync } from 'node:fs';
+import { createReadStream, existsSync, mkdirSync, openSync, readFileSync, readSync, readdirSync, rmSync, statSync, closeSync } from 'node:fs';
 import http from 'node:http';
 import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { register as registerTypeScript } from 'tsx/esm/api';
+import { createPush } from './push.mjs';
 
 const TOKEN = process.env.SERVER_TOKEN || '';
 const PORT = Number(process.env.PORT || 3000);
@@ -393,6 +396,31 @@ function codexLimits() {
   }
 }
 
+// ---------- AI 팀 (서버에서 실행) ----------
+
+const DATA_DIR = process.env.DATA_DIR || join(homedir(), '.my-office');
+mkdirSync(DATA_DIR, { recursive: true });
+// office.ts는 앱과 같은 역할 정의(src/roles.ts)를 쓰므로 TypeScript로 불러옵니다.
+registerTypeScript();
+const { createOffice } = await import('./office.ts');
+const push = createPush({
+  dataDir: DATA_DIR,
+  serviceAccountPath: process.env.FIREBASE_SERVICE_ACCOUNT || join(DATA_DIR, 'firebase-service-account.json'),
+});
+const office = createOffice({
+  dataDir: DATA_DIR,
+  chat: ({ provider, ...p }) => {
+    console.log(`[office] ${provider} ${p.model || '(기본 모델)'}`);
+    return provider === 'openai' ? codexChat(p) : claudeChat(p);
+  },
+  image: (prompt) => codexImage({ prompt }),
+  notify: (a) => {
+    console.log(`[알림] ${a.title} — ${a.body}`);
+    push.send(a).catch((e) => console.error('[push]', e?.message || e));
+  },
+});
+console.log(`데이터 폴더: ${DATA_DIR}`);
+
 // ---------- HTTP ----------
 
 function authorized(req, url) {
@@ -473,6 +501,36 @@ const server = http.createServer(async (req, res) => {
       const provider = body.provider === 'openai' ? 'openai' : 'claude';
       console.log(`[chat] ${provider} ${body.model || '(기본 모델)'}`);
       return longJson(res, (signal) => (provider === 'openai' ? codexChat(body, signal) : claudeChat(body, signal)));
+    }
+    if (req.method === 'GET' && url.pathname === '/v1/state') {
+      const since = Number(url.searchParams.get('since') || 0);
+      const waitMs = Math.max(0, Math.min(Number(url.searchParams.get('wait') || 0), 30)) * 1000;
+      const s = await office.waitForChange(since, waitMs);
+      return send(res, 200, { ...s, settings: office.settings(), push: push.enabled() });
+    }
+    if (req.method === 'POST' && url.pathname === '/v1/action') {
+      const body = await readJson(req);
+      console.log(`[action] ${body.type}${body.role ? ' ' + body.role : ''}`);
+      office.act(body);
+      return send(res, 200, { ok: true });
+    }
+    if (req.method === 'POST' && url.pathname === '/v1/settings') {
+      return send(res, 200, office.setSettings(await readJson(req)));
+    }
+    if (req.method === 'POST' && url.pathname === '/v1/push/register') {
+      const body = await readJson(req);
+      return send(res, 200, { ok: true, push: push.register(body.token) });
+    }
+    const fileMatch = req.method === 'GET' && url.pathname.match(/^\/v1\/files\/([A-Za-z0-9_-]+)$/);
+    if (fileMatch) {
+      const f = office.file(fileMatch[1]);
+      if (!f) return send(res, 404, { error: { message: '파일이 없습니다.' } });
+      res.writeHead(200, {
+        'Content-Type': f.mime.startsWith('image/') ? f.mime : `${f.mime}; charset=utf-8`,
+        'Content-Length': f.size,
+        'Cache-Control': 'no-store',
+      });
+      return createReadStream(f.path).pipe(res);
     }
     if (req.method === 'POST' && url.pathname === '/v1/image') {
       const body = await readJson(req);

@@ -20,6 +20,7 @@ import { EnergyBar, Panel, px, PxButton } from '../pixel';
 import { ROLES, roleInfo } from '../roles';
 import { useSettings } from '../settings';
 import { useBusy, useProject } from '../store';
+import { useSyncStatus } from '../sync';
 import { Project, RoleId, Task } from '../types';
 import { energyColor, remainingPct, resetText, tightestWindow, useUsage } from '../usage';
 
@@ -87,6 +88,7 @@ export default function Home() {
   const project = useProject();
   const settings = useSettings();
   const busy = useBusy();
+  const sync = useSyncStatus();
   const insets = useSafeAreaInsets();
   const { width } = useWindowDimensions();
   const [request, setRequest] = useState('');
@@ -116,7 +118,7 @@ export default function Home() {
   };
 
   const confirmReset = () =>
-    Alert.alert('새 프로젝트', '현재 프로젝트의 대화와 작업 목록을 지웁니다. 산출물 파일은 기기에 남습니다.', [
+    Alert.alert('새 프로젝트', '현재 프로젝트의 대화와 작업 목록을 지웁니다. 산출물 파일은 서버에 남습니다.', [
       { text: '취소', style: 'cancel' },
       { text: '새로 시작', style: 'destructive', onPress: resetProject },
     ]);
@@ -142,6 +144,14 @@ export default function Home() {
               <Text style={styles.iconText}>설정</Text>
             </Pressable>
           </View>
+
+          {!sync.connected && (
+            <Pressable onPress={() => router.push('/settings')} accessibilityRole="button" style={styles.offline}>
+              <Text style={styles.offlineText} numberOfLines={2}>
+                서버 연결 안 됨 · {sync.error ?? '연결하는 중…'}
+              </Text>
+            </Pressable>
+          )}
 
           <View style={styles.chips}>
             <EnergyChip name="Claude" provider="claude" />
@@ -317,6 +327,8 @@ const styles = StyleSheet.create({
   pad: { paddingHorizontal: 12 },
   titleRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' },
   title: { color: px.cream, fontSize: 21, fontWeight: '900' },
+  offline: { marginTop: 8, padding: 8, backgroundColor: px.dark, borderWidth: 2, borderColor: px.coral },
+  offlineText: { color: px.coral, fontSize: 12, fontWeight: '700' },
   iconBtn: {
     minWidth: 52,
     height: 40,

@@ -55,12 +55,8 @@ export async function loadProject(): Promise<void> {
   try {
     const raw = await AsyncStorage.getItem(PROJECT_KEY);
     if (!raw) return;
-    const p = { ...emptyProject(), ...(JSON.parse(raw) as Project) };
-    // A run that was interrupted by closing the app is resumed by the user.
-    p.tasks = p.tasks.map((t) => (t.status === 'running' ? { ...t, status: 'pending' } : t));
-    if (p.phase === 'running') p.phase = 'paused';
-    if (p.phase === 'planning') p.phase = p.tasks.length ? 'awaiting_approval' : 'idle';
-    projectStore.set(() => p);
+    // 서버가 진짜 상태를 갖고 있고, 이 값은 서버와 연결되기 전까지 보여 줄 마지막 화면입니다.
+    projectStore.set(() => ({ ...emptyProject(), ...(JSON.parse(raw) as Project) }));
   } catch {
     // ignore corrupted state
   }

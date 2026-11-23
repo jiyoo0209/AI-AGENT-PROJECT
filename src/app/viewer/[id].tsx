@@ -1,8 +1,7 @@
-import { File } from 'expo-file-system';
 import { Stack, useLocalSearchParams } from 'expo-router';
 import { useEffect, useState } from 'react';
 import { ActivityIndicator, Image, ScrollView, StyleSheet, Text, View } from 'react-native';
-import { readText } from '../../deliverables';
+import { fileHeaders, fileUrl, readText } from '../../deliverables';
 import { downloadWithAlert, shareWithAlert } from '../../FileCard';
 import { roleInfo } from '../../roles';
 import { useProject } from '../../store';
@@ -80,7 +79,6 @@ export default function Viewer() {
     );
   }
 
-  const exists = new File(d.uri).exists;
   const isCsv = d.name.toLowerCase().endsWith('.csv');
 
   return (
@@ -95,13 +93,9 @@ export default function Viewer() {
           <Button small title="다운로드" onPress={() => downloadWithAlert(d)} />
         </View>
       </View>
-      {!exists ? (
-        <View style={styles.center}>
-          <Text style={styles.sub}>파일이 기기에서 삭제되었습니다.</Text>
-        </View>
-      ) : d.isBinary ? (
+      {d.isBinary ? (
         <ScrollView contentContainerStyle={{ padding: 12 }}>
-          <Image source={{ uri: d.uri }} style={styles.image} resizeMode="contain" />
+          <Image source={{ uri: fileUrl(d), headers: fileHeaders() }} style={styles.image} resizeMode="contain" />
         </ScrollView>
       ) : error ? (
         <View style={styles.center}>
