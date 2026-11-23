@@ -2,21 +2,16 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 import { useSyncExternalStore } from 'react';
 import { Provider } from './types';
 
-/** Per-minute rate-limit state as reported by the provider's response headers. */
-export interface RateSnapshot {
-  tokensRemaining?: number;
-  tokensLimit?: number;
-  inputRemaining?: number;
-  inputLimit?: number;
-  outputRemaining?: number;
-  outputLimit?: number;
-  requestsRemaining?: number;
-  requestsLimit?: number;
-  reset?: string;
-  /** 구독(Claude Pro 등) 한도 사용률 0~1. 맥미니 서버를 쓸 때만 옵니다. */
-  utilization?: number;
-  limitType?: string;
-  limitStatus?: string;
+/** 구독 한도 창 하나 (예: 5시간, 주간). usedPct는 0~100. */
+export interface LimitWindow {
+  key: string;
+  label: string;
+  usedPct: number;
+  resetsAt: string | null;
+}
+
+export interface ProviderLimits {
+  windows: LimitWindow[];
   at: number;
 }
 
@@ -29,10 +24,10 @@ export interface MonthlyUsage {
 export interface UsageState {
   month: string; // YYYY-MM
   byProvider: Record<Provider, MonthlyUsage>;
-  rate: Partial<Record<Provider, RateSnapshot>>;
+  limits: Partial<Record<Provider, ProviderLimits>>;
 }
 
-const KEY = 'usage.v1';
+const KEY = 'usage.v2';
 
 function thisMonth(): string {
   const d = new Date();
@@ -41,7 +36,7 @@ function thisMonth(): string {
 
 function emptyUsage(): UsageState {
   const zero = (): MonthlyUsage => ({ input: 0, output: 0, requests: 0 });
-  return { month: thisMonth(), byProvider: { claude: zero(), openai: zero() }, rate: {} };
+  return { month: thisMonth(), byProvider: { claude: zero(), openai: zero() }, limits: {} };
 }
 
 let state: UsageState = emptyUsage();
@@ -53,10 +48,10 @@ function set(next: UsageState) {
   AsyncStorage.setItem(KEY, JSON.stringify(state)).catch(() => {});
 }
 
-/** Starts a new monthly tally when the month changes; rate snapshots are kept. */
+/** Starts a new monthly tally when the month changes; limit snapshots are kept. */
 function current(): UsageState {
   if (state.month === thisMonth()) return state;
-  return { ...emptyUsage(), rate: state.rate };
+  return { ...emptyUsage(), limits: state.limits };
 }
 
 export async function loadUsage(): Promise<void> {
@@ -101,65 +96,44 @@ export function recordUsage(provider: Provider, input: number, output: number) {
   });
 }
 
-function num(headers: Headers, name: string): number | undefined {
-  const v = headers.get(name);
-  if (v == null || v === '') return undefined;
-  const n = Number(v);
-  return Number.isFinite(n) ? n : undefined;
+/** 맥미니 서버가 알려준 구독 한도를 기록합니다. null이면 이번에 못 읽은 것이므로 이전 값을 둡니다. */
+export function recordLimits(provider: Provider, windows: LimitWindow[] | null) {
+  if (!windows || windows.length === 0) return;
+  const s = current();
+  set({ ...s, limits: { ...s.limits, [provider]: { windows, at: Date.now() } } });
 }
 
-/** 맥미니 서버가 알려준 구독 한도 상태를 기록합니다. */
-export function recordSubscriptionLimit(
-  provider: Provider,
-  info: { status?: string; utilization?: number; resetsAt?: number; type?: string },
-) {
-  let reset: string | undefined;
-  if (typeof info.resetsAt === 'number' && info.resetsAt > 0) {
-    // 초 단위와 밀리초 단위 모두 받아 줍니다.
-    const ms = info.resetsAt < 1e12 ? info.resetsAt * 1000 : info.resetsAt;
-    reset = new Date(ms).toISOString();
-  }
-  const snap: RateSnapshot = {
-    utilization: typeof info.utilization === 'number' ? info.utilization : undefined,
-    limitType: info.type,
-    limitStatus: info.status,
-    reset,
-    at: Date.now(),
-  };
-  const s = current();
-  set({ ...s, rate: { ...s.rate, [provider]: snap } });
+/** 남은 에너지(%): 가장 많이 쓴 창 기준. 정보가 없으면 undefined. */
+export function remainingPct(limits?: ProviderLimits): number | undefined {
+  if (!limits || limits.windows.length === 0) return undefined;
+  const now = Date.now();
+  const used = Math.max(
+    ...limits.windows.map((w) => (w.resetsAt && Date.parse(w.resetsAt) < now ? 0 : w.usedPct)),
+  );
+  return Math.max(0, Math.min(100, Math.round(100 - used)));
 }
 
-export function recordRateHeaders(provider: Provider, headers: Headers) {
-  let snap: RateSnapshot;
-  if (provider === 'claude') {
-    snap = {
-      tokensRemaining: num(headers, 'anthropic-ratelimit-tokens-remaining'),
-      tokensLimit: num(headers, 'anthropic-ratelimit-tokens-limit'),
-      inputRemaining: num(headers, 'anthropic-ratelimit-input-tokens-remaining'),
-      inputLimit: num(headers, 'anthropic-ratelimit-input-tokens-limit'),
-      outputRemaining: num(headers, 'anthropic-ratelimit-output-tokens-remaining'),
-      outputLimit: num(headers, 'anthropic-ratelimit-output-tokens-limit'),
-      requestsRemaining: num(headers, 'anthropic-ratelimit-requests-remaining'),
-      requestsLimit: num(headers, 'anthropic-ratelimit-requests-limit'),
-      reset:
-        headers.get('anthropic-ratelimit-tokens-reset') ??
-        headers.get('anthropic-ratelimit-input-tokens-reset') ??
-        undefined,
-      at: Date.now(),
-    };
-  } else {
-    snap = {
-      tokensRemaining: num(headers, 'x-ratelimit-remaining-tokens'),
-      tokensLimit: num(headers, 'x-ratelimit-limit-tokens'),
-      requestsRemaining: num(headers, 'x-ratelimit-remaining-requests'),
-      requestsLimit: num(headers, 'x-ratelimit-limit-requests'),
-      reset: headers.get('x-ratelimit-reset-tokens') ?? undefined,
-      at: Date.now(),
-    };
-  }
-  const hasAny = Object.entries(snap).some(([k, v]) => k !== 'at' && v !== undefined);
-  if (!hasAny) return;
-  const s = current();
-  set({ ...s, rate: { ...s.rate, [provider]: snap } });
+/** 남은 에너지가 가장 적은 창 (홈 화면 요약용) */
+export function tightestWindow(limits?: ProviderLimits): LimitWindow | undefined {
+  if (!limits || limits.windows.length === 0) return undefined;
+  return [...limits.windows].sort((a, b) => b.usedPct - a.usedPct)[0];
+}
+
+export function energyColor(pct: number | undefined): string {
+  if (pct === undefined) return '#8C8FA8';
+  if (pct >= 50) return '#5FD3A6';
+  if (pct >= 20) return '#F5C04A';
+  return '#F07A63';
+}
+
+export function resetText(iso: string | null | undefined): string {
+  if (!iso) return '';
+  const ms = Date.parse(iso) - Date.now();
+  if (Number.isNaN(ms)) return '';
+  if (ms <= 0) return '곧 충전';
+  const min = Math.round(ms / 60000);
+  if (min < 60) return `${min}분 후 충전`;
+  const h = Math.floor(min / 60);
+  if (h < 24) return `${h}시간 ${min % 60}분 후 충전`;
+  return `${Math.floor(h / 24)}일 후 충전`;
 }

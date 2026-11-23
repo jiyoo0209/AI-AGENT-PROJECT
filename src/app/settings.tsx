@@ -1,17 +1,58 @@
 import { router } from 'expo-router';
 import { useState } from 'react';
-import { Alert, ScrollView, StyleSheet, Switch, Text, TextInput, View } from 'react-native';
+import { Alert, Modal, Pressable, ScrollView, StyleSheet, Switch, Text, TextInput, View } from 'react-native';
 import { checkServer } from '../llm';
 import { ROLES } from '../roles';
-import {
-  DEFAULT_CLAUDE_MODEL,
-  DEFAULT_OPENAI_MODEL,
-  saveSettings,
-  useSettings,
-} from '../settings';
-import { Provider, RoleId, Settings } from '../types';
+import { defaultModel, modelLabel, modelOptions, saveSettings, useSettings } from '../settings';
+import { Provider, RoleId, RoleModel, Settings } from '../types';
 import { Button, Card, colors } from '../ui';
-import { UsageCard } from '../UsageCard';
+
+/** 모델 선택 콤보박스: 누르면 목록이 열립니다. */
+function ModelPicker(props: { value: RoleModel; onChange: (model: string) => void; roleName: string }) {
+  const [open, setOpen] = useState(false);
+  const options = modelOptions(props.value.provider);
+  return (
+    <>
+      <Pressable
+        onPress={() => setOpen(true)}
+        accessibilityRole="button"
+        accessibilityLabel={`${props.roleName} 모델 선택, 현재 ${modelLabel(props.value)}`}
+        style={styles.combo}
+      >
+        <Text style={styles.comboText}>{modelLabel(props.value)}</Text>
+        <Text style={styles.comboArrow}>▾</Text>
+      </Pressable>
+      <Modal visible={open} transparent animationType="fade" onRequestClose={() => setOpen(false)}>
+        <Pressable style={styles.backdrop} onPress={() => setOpen(false)}>
+          <Pressable style={styles.sheet} onPress={() => {}}>
+            <Text style={styles.sheetTitle}>{props.roleName} 모델</Text>
+            {options.map((o) => {
+              const selected = o.id === props.value.model;
+              return (
+                <Pressable
+                  key={o.id || 'default'}
+                  onPress={() => {
+                    props.onChange(o.id);
+                    setOpen(false);
+                  }}
+                  accessibilityRole="radio"
+                  accessibilityState={{ selected }}
+                  style={[styles.option, selected && styles.optionSelected]}
+                >
+                  <Text style={[styles.optionLabel, selected && { color: colors.primary }]}>
+                    {selected ? '● ' : '○ '}
+                    {o.label}
+                  </Text>
+                  {!!o.note && <Text style={styles.optionNote}>{o.note}</Text>}
+                </Pressable>
+              );
+            })}
+          </Pressable>
+        </Pressable>
+      </Modal>
+    </>
+  );
+}
 
 export default function SettingsScreen() {
   const saved = useSettings();
@@ -31,14 +72,10 @@ export default function SettingsScreen() {
     }
   };
 
-  const setRole = (role: RoleId, patch: Partial<Settings['roles'][RoleId]>) =>
+  const setRole = (role: RoleId, patch: Partial<RoleModel>) =>
     setDraft((d) => ({ ...d, roles: { ...d.roles, [role]: { ...d.roles[role], ...patch } } }));
 
-  const switchProvider = (role: RoleId, provider: Provider) =>
-    setRole(role, {
-      provider,
-      model: provider === 'claude' ? DEFAULT_CLAUDE_MODEL : DEFAULT_OPENAI_MODEL,
-    });
+  const switchProvider = (role: RoleId, provider: Provider) => setRole(role, { provider, model: defaultModel(provider) });
 
   const save = async () => {
     setSaving(true);
@@ -55,9 +92,9 @@ export default function SettingsScreen() {
   return (
     <ScrollView contentContainerStyle={styles.container} keyboardShouldPersistTaps="handled">
       <Card>
-        <Text style={styles.title}>맥미니 서버 (구독 사용)</Text>
+        <Text style={styles.title}>맥미니 서버</Text>
         <Text style={styles.sub}>
-          주소를 넣으면 API 키 대신 맥미니에 로그인된 Claude Pro와 ChatGPT Plus 구독으로 일합니다. 토큰은 이 기기의 보안 저장소에만 저장됩니다.
+          맥미니에 로그인된 Claude Pro와 ChatGPT Plus 구독으로 일합니다. 토큰은 이 기기의 보안 저장소에만 저장됩니다.
         </Text>
         <Text style={styles.label}>서버 주소</Text>
         <TextInput
@@ -91,44 +128,8 @@ export default function SettingsScreen() {
       </Card>
 
       <Card>
-        <Text style={styles.title}>API 키</Text>
-        <Text style={styles.sub}>
-          맥미니 서버를 쓰면 비워 두세요. 서버 주소가 비어 있을 때만 쓰입니다. 키는 이 기기의 보안 저장소에만 저장되고, 각 AI 회사 서버로만 전송됩니다.
-        </Text>
-        <Text style={styles.label}>Claude (Anthropic) API 키</Text>
-        <TextInput
-          style={styles.input}
-          value={draft.anthropicKey}
-          onChangeText={(v) => setDraft((d) => ({ ...d, anthropicKey: v }))}
-          placeholder="sk-ant-..."
-          secureTextEntry
-          autoCapitalize="none"
-          autoCorrect={false}
-        />
-        <Text style={styles.label}>OpenAI API 키</Text>
-        <TextInput
-          style={styles.input}
-          value={draft.openaiKey}
-          onChangeText={(v) => setDraft((d) => ({ ...d, openaiKey: v }))}
-          placeholder="sk-..."
-          secureTextEntry
-          autoCapitalize="none"
-          autoCorrect={false}
-        />
-      </Card>
-
-      <UsageCard
-        draft={draft}
-        onBudgetChange={(p, v) =>
-          setDraft((d) => ({ ...d, monthlyTokenBudget: { ...d.monthlyTokenBudget, [p]: v } }))
-        }
-      />
-
-      <Card>
         <Text style={styles.title}>역할별 AI 모델</Text>
-        <Text style={styles.sub}>
-          모델명은 각 회사의 모델 ID를 그대로 적습니다. 맥미니 서버에서 쓸 수 없는 모델이면 각 구독의 기본 모델로 답합니다.
-        </Text>
+        <Text style={styles.sub}>남은 한도는 홈의 AI 에너지에서 볼 수 있어요.</Text>
         {ROLES.map((r) => {
           const m = draft.roles[r.id];
           return (
@@ -139,43 +140,26 @@ export default function SettingsScreen() {
                   <Button
                     key={p}
                     small
-                    title={p === 'claude' ? 'Claude' : 'OpenAI'}
+                    title={p === 'claude' ? 'Claude' : 'ChatGPT'}
                     variant={m.provider === p ? 'primary' : 'secondary'}
                     onPress={() => switchProvider(r.id, p)}
                     style={{ flex: 1 }}
                   />
                 ))}
               </View>
-              <TextInput
-                style={styles.input}
-                value={m.model}
-                onChangeText={(v) => setRole(r.id, { model: v.trim() })}
-                autoCapitalize="none"
-                autoCorrect={false}
-              />
+              <ModelPicker value={m} roleName={r.name} onChange={(model) => setRole(r.id, { model })} />
             </View>
           );
         })}
-        <Text style={styles.label}>디자인 시안 이미지 모델 (OpenAI, API 키를 쓸 때만)</Text>
-        <TextInput
-          style={styles.input}
-          value={draft.imageModel}
-          onChangeText={(v) => setDraft((d) => ({ ...d, imageModel: v.trim() }))}
-          autoCapitalize="none"
-          autoCorrect={false}
-        />
       </Card>
 
       <Card>
         <View style={styles.switchRow}>
           <View style={{ flex: 1 }}>
-            <Text style={styles.title}>작업마다 승인</Text>
-            <Text style={styles.sub}>켜면 작업 하나가 끝날 때마다 멈추고, 결과를 확인한 뒤 다음 작업을 승인합니다.</Text>
+            <Text style={styles.title}>작업마다 결재</Text>
+            <Text style={styles.sub}>켜면 작업 하나가 끝날 때마다 담당 팀원이 대표실로 와서 결재를 기다립니다.</Text>
           </View>
-          <Switch
-            value={draft.stepApproval}
-            onValueChange={(v) => setDraft((d) => ({ ...d, stepApproval: v }))}
-          />
+          <Switch value={draft.stepApproval} onValueChange={(v) => setDraft((d) => ({ ...d, stepApproval: v }))} />
         </View>
       </Card>
 
@@ -202,5 +186,32 @@ const styles = StyleSheet.create({
   roleRow: { marginTop: 16 },
   roleName: { fontSize: 14, fontWeight: '700' },
   segment: { flexDirection: 'row', gap: 6, marginTop: 6 },
+  combo: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    minHeight: 44,
+    borderWidth: 1,
+    borderColor: colors.border,
+    borderRadius: 10,
+    paddingHorizontal: 12,
+    marginTop: 6,
+  },
+  comboText: { fontSize: 14, color: colors.text, fontWeight: '600' },
+  comboArrow: { fontSize: 14, color: colors.sub },
+  backdrop: { flex: 1, backgroundColor: 'rgba(0,0,0,0.4)', justifyContent: 'flex-end' },
+  sheet: {
+    backgroundColor: colors.card,
+    borderTopLeftRadius: 16,
+    borderTopRightRadius: 16,
+    padding: 16,
+    paddingBottom: 32,
+    gap: 6,
+  },
+  sheetTitle: { fontSize: 16, fontWeight: '700', color: colors.text, marginBottom: 6 },
+  option: { paddingVertical: 12, paddingHorizontal: 12, borderRadius: 10, borderWidth: 1, borderColor: colors.border },
+  optionSelected: { borderColor: colors.primary, backgroundColor: '#EFF6FF' },
+  optionLabel: { fontSize: 15, fontWeight: '600', color: colors.text },
+  optionNote: { fontSize: 12, color: colors.sub, marginTop: 2 },
   switchRow: { flexDirection: 'row', alignItems: 'center', gap: 12 },
 });

@@ -5,7 +5,7 @@
 import { query } from '@anthropic-ai/claude-agent-sdk';
 import { Codex } from '@openai/codex-sdk';
 import { randomUUID, timingSafeEqual } from 'node:crypto';
-import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync } from 'node:fs';
+import { existsSync, mkdirSync, openSync, readFileSync, readSync, readdirSync, rmSync, statSync, closeSync } from 'node:fs';
 import http from 'node:http';
 import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -271,6 +271,128 @@ async function codexImage({ prompt }, signal) {
   }
 }
 
+// ---------- 남은 한도 ----------
+
+function withTimeout(promise, ms) {
+  return Promise.race([promise, new Promise((_, rej) => setTimeout(() => rej(new Error('timeout')), ms))]);
+}
+
+/** Claude 구독 한도: Agent SDK의 /usage 정보 (실험적 기능이라 실패하면 null) */
+async function claudeLimits() {
+  const dir = workDir();
+  const abortController = new AbortController();
+  let release;
+  const hold = new Promise((r) => (release = r));
+  async function* input() {
+    await hold;
+  }
+  try {
+    const q = query({
+      prompt: input(),
+      options: { tools: [], settingSources: [], persistSession: false, cwd: dir, env: subscriptionEnv(), abortController },
+    });
+    (async () => {
+      try {
+        for await (const _ of q) {
+          // 메시지를 흘려보내 제어 요청이 처리되게 함
+        }
+      } catch {
+        // 중단 시 무시
+      }
+    })();
+    const fn = q.usage_EXPERIMENTAL_MAY_CHANGE_DO_NOT_RELY_ON_THIS_API_YET;
+    if (typeof fn !== 'function') return null;
+    const u = await withTimeout(fn.call(q, { skipBehaviors: true }), 30000);
+    const rl = u && u.rate_limits;
+    if (!rl) return null;
+    const win = (w, key, label) =>
+      w && typeof w.utilization === 'number' ? { key, label, usedPct: w.utilization, resetsAt: w.resets_at || null } : null;
+    return [win(rl.five_hour, 'five_hour', '5시간'), win(rl.seven_day, 'seven_day', '주간')].filter(Boolean);
+  } catch (e) {
+    console.error('[limits] claude', e?.message || e);
+    return null;
+  } finally {
+    release();
+    abortController.abort();
+    cleanup(dir);
+  }
+}
+
+function tail(file, bytes) {
+  const size = statSync(file).size;
+  const start = Math.max(0, size - bytes);
+  const fd = openSync(file, 'r');
+  try {
+    const buf = Buffer.alloc(size - start);
+    readSync(fd, buf, 0, buf.length, start);
+    return buf.toString('utf8');
+  } finally {
+    closeSync(fd);
+  }
+}
+
+function findRateLimits(obj) {
+  if (!obj || typeof obj !== 'object') return null;
+  if (obj.rate_limits && typeof obj.rate_limits === 'object') return obj.rate_limits;
+  for (const v of Object.values(obj)) {
+    const r = findRateLimits(v);
+    if (r) return r;
+  }
+  return null;
+}
+
+/** ChatGPT 구독 한도: Codex가 남기는 세션 기록(~/.codex/sessions)의 마지막 rate_limits */
+function codexLimits() {
+  try {
+    const root = join(homedir(), '.codex', 'sessions');
+    if (!existsSync(root)) return null;
+    const files = [];
+    const walk = (d, depth) => {
+      for (const name of readdirSync(d)) {
+        const p = join(d, name);
+        if (depth < 3 && statSync(p).isDirectory()) walk(p, depth + 1);
+        else if (/^rollout-.*\.jsonl$/.test(name)) files.push({ p, name });
+      }
+    };
+    walk(root, 0);
+    // 파일 이름의 시각 순서 (Codex가 옛 파일을 다시 쓰기도 해서 수정 시각은 믿지 않음)
+    files.sort((a, b) => (a.name < b.name ? 1 : -1));
+    const now = Date.now() / 1000;
+    for (const f of files.slice(0, 8)) {
+      const lines = tail(f.p, 256 * 1024).split('\n').reverse();
+      for (const line of lines) {
+        if (!line.includes('rate_limits')) continue;
+        let rl;
+        try {
+          rl = findRateLimits(JSON.parse(line));
+        } catch {
+          continue;
+        }
+        if (!rl) continue;
+        const out = [];
+        for (const w of [rl.primary, rl.secondary]) {
+          if (!w || typeof w.used_percent !== 'number') continue;
+          let resetSec = typeof w.resets_at === 'number' ? w.resets_at : null;
+          if (resetSec == null && typeof w.resets_in_seconds === 'number') resetSec = null;
+          const passed = resetSec != null && resetSec < now;
+          const minutes = w.window_minutes;
+          out.push({
+            key: minutes === 300 ? 'five_hour' : minutes === 10080 ? 'seven_day' : `m${minutes}`,
+            label: minutes === 300 ? '5시간' : minutes === 10080 ? '주간' : `${Math.round((minutes || 0) / 60)}시간`,
+            usedPct: passed ? 0 : w.used_percent,
+            resetsAt: resetSec != null && !passed ? new Date(resetSec * 1000).toISOString() : null,
+          });
+        }
+        if (out.length) return out;
+      }
+    }
+    return null;
+  } catch (e) {
+    console.error('[limits] codex', e?.message || e);
+    return null;
+  }
+}
+
 // ---------- HTTP ----------
 
 function authorized(req, url) {
@@ -341,6 +463,10 @@ const server = http.createServer(async (req, res) => {
     }
     if (req.method === 'GET' && url.pathname === '/v1/health') {
       return send(res, 200, { ok: true, providers: ['claude', 'openai'] });
+    }
+    if (req.method === 'GET' && url.pathname === '/v1/limits') {
+      const [claude, openai] = await Promise.all([claudeLimits(), Promise.resolve(codexLimits())]);
+      return send(res, 200, { claude, openai, at: new Date().toISOString() });
     }
     if (req.method === 'POST' && url.pathname === '/v1/chat') {
       const body = await readJson(req);

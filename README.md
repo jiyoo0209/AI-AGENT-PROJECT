@@ -1,4 +1,4 @@
-# AI 프로젝트매니저 (AI-AGENT-PROJECT)
+# 나만의사무실 (AI-AGENT-PROJECT)
 
 역할별 AI 에이전트가 하나의 개발팀처럼 일하는 Android 앱입니다. 사용자는 최종 책임자(대표)이고, PM 에이전트가 요청을 작업으로 나눠 팀원에게 할당합니다. 계획은 대표가 승인한 뒤에 실행됩니다.
 
@@ -19,7 +19,7 @@
 1. 이 저장소의 **Releases**에서 가장 최근 빌드의 `AI-Agent-Project-N.apk`를 휴대폰으로 내려받습니다.
    (또는 **Actions** → 최근 실행 → Artifacts에서 내려받습니다. 이 경우 zip을 풀어야 합니다.)
 2. 설치할 때 "출처를 알 수 없는 앱" 설치를 허용합니다.
-3. 앱 **설정**의 **맥미니 서버**에 서버 주소와 토큰을 입력합니다. 맥미니에 로그인된 Claude Pro·ChatGPT Plus 구독으로 일하므로 API 요금이 들지 않습니다. 서버 설치는 [server/README.md](server/README.md)를 보세요. 서버 없이 쓰려면 Claude·OpenAI API 키를 입력합니다. 토큰과 키는 기기 보안 저장소에만 저장됩니다.
+3. 앱 **설정**의 **맥미니 서버**에 서버 주소와 토큰을 입력합니다. 맥미니에 로그인된 Claude Pro·ChatGPT Plus 구독으로 일하므로 API 요금이 들지 않습니다. 서버 설치는 [server/README.md](server/README.md)를 보세요. 토큰은 기기 보안 저장소에만 저장됩니다.
 
 ## 사용 흐름
 

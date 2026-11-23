@@ -38,6 +38,7 @@ pm2 restart ai-server
 | `GET /v1/health` | 앱의 연결 테스트 |
 | `POST /v1/chat` | `{ provider: "claude" \| "openai", model, system, messages }` → `{ text, usage, limits? }` |
 | `POST /v1/image` | `{ prompt }` → `{ base64 }` (Codex의 이미지 생성 도구 사용) |
+| `GET /v1/limits` | 남은 구독 한도. Claude는 Agent SDK의 /usage 정보, ChatGPT는 Codex 세션 기록(`~/.codex/sessions`)에서 읽음 |
 
 오래 걸리는 요청은 연결이 끊기지 않도록 15초마다 공백을 먼저 보내고, 마지막에 JSON을 보냅니다. 그래서 실패도 200 응답의 `error` 필드로 옵니다.
 

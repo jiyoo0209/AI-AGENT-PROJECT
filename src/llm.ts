@@ -1,5 +1,5 @@
 import { Provider, Settings } from './types';
-import { recordRateHeaders, recordSubscriptionLimit, recordUsage } from './usage';
+import { LimitWindow, recordLimits, recordUsage } from './usage';
 
 export interface LlmMessage {
   role: 'user' | 'assistant';
@@ -21,11 +21,6 @@ function normalize(messages: LlmMessage[]): LlmMessage[] {
   return out;
 }
 
-/** 맥미니 서버 주소가 있으면 API 키 대신 서버(구독)로 호출합니다. */
-export function usesServer(settings: Settings): boolean {
-  return !!settings.serverUrl.trim();
-}
-
 interface ServerUsage {
   input?: number;
   output?: number;
@@ -36,6 +31,7 @@ interface ServerUsage {
  * 마지막에 JSON을 보내므로, 실패도 200 응답 본문의 error 필드로 옵니다.
  */
 async function callServer<T>(settings: Settings, path: string, body?: unknown): Promise<T> {
+  if (!settings.serverUrl.trim()) throw new Error('맥미니 서버 주소가 없습니다. 설정에서 입력하세요.');
   if (!settings.serverToken) throw new Error('맥미니 서버 토큰이 없습니다. 설정에서 입력하세요.');
   const base = settings.serverUrl.trim().replace(/\/+$/, '');
   let res: Response;
@@ -72,102 +68,23 @@ export async function checkServer(settings: Settings): Promise<void> {
   await callServer(settings, '/v1/health');
 }
 
-async function readError(res: Response): Promise<string> {
-  try {
-    const j = await res.json();
-    return j?.error?.message ?? JSON.stringify(j);
-  } catch {
-    return res.statusText || '알 수 없는 오류';
-  }
-}
-
 export async function chat(params: {
   provider: Provider;
   model: string;
   system: string;
   messages: LlmMessage[];
   settings: Settings;
-  maxTokens?: number;
 }): Promise<string> {
   const { provider, model, system, settings } = params;
-  const messages = normalize(params.messages);
-  const maxTokens = params.maxTokens ?? 16000;
-
-  if (usesServer(settings)) {
-    const data = await callServer<{
-      text: string;
-      usage?: ServerUsage;
-      limits?: Parameters<typeof recordSubscriptionLimit>[1];
-    }>(settings, '/v1/chat', { provider, model, system, messages, maxTokens });
-    recordUsage(provider, data.usage?.input ?? 0, data.usage?.output ?? 0);
-    if (data.limits) recordSubscriptionLimit(provider, data.limits);
-    return data.text ?? '';
-  }
-
-  if (provider === 'claude') {
-    if (!settings.anthropicKey) throw new Error('Claude API 키가 없습니다. 설정에서 입력하세요.');
-    const res = await fetch('https://api.anthropic.com/v1/messages', {
-      method: 'POST',
-      headers: {
-        'content-type': 'application/json',
-        'x-api-key': settings.anthropicKey,
-        'anthropic-version': '2023-06-01',
-      },
-      body: JSON.stringify({ model, max_tokens: maxTokens, system, messages }),
-    });
-    recordRateHeaders('claude', res.headers);
-    if (!res.ok) throw new Error(`Claude API 오류 (${res.status}): ${await readError(res)}`);
-    const data = await res.json();
-    recordUsage(
-      'claude',
-      (data.usage?.input_tokens ?? 0) +
-        (data.usage?.cache_creation_input_tokens ?? 0) +
-        (data.usage?.cache_read_input_tokens ?? 0),
-      data.usage?.output_tokens ?? 0,
-    );
-    const text = (data.content ?? [])
-      .filter((b: { type: string }) => b.type === 'text')
-      .map((b: { text: string }) => b.text)
-      .join('');
-    if (data.stop_reason === 'max_tokens') {
-      return text + '\n\n(응답이 길어 중간에 끊겼습니다. "이어서 작성해줘"라고 요청하세요.)';
-    }
-    return text;
-  }
-
-  if (!settings.openaiKey) throw new Error('OpenAI API 키가 없습니다. 설정에서 입력하세요.');
-  const res = await fetch('https://api.openai.com/v1/responses', {
-    method: 'POST',
-    headers: {
-      'content-type': 'application/json',
-      authorization: `Bearer ${settings.openaiKey}`,
-    },
-    body: JSON.stringify({
-      model,
-      instructions: system,
-      input: messages.map((m) => ({ role: m.role, content: m.content })),
-      max_output_tokens: maxTokens,
-    }),
+  const data = await callServer<{ text: string; usage?: ServerUsage }>(settings, '/v1/chat', {
+    provider,
+    model,
+    system,
+    messages: normalize(params.messages),
   });
-  recordRateHeaders('openai', res.headers);
-  if (!res.ok) throw new Error(`OpenAI API 오류 (${res.status}): ${await readError(res)}`);
-  const data = await res.json();
-  recordUsage('openai', data.usage?.input_tokens ?? 0, data.usage?.output_tokens ?? 0);
-  let text = typeof data.output_text === 'string' ? data.output_text : '';
-  if (!text) {
-    const parts: string[] = [];
-    for (const item of data.output ?? []) {
-      if (item.type !== 'message') continue;
-      for (const c of item.content ?? []) {
-        if (c.type === 'output_text' && typeof c.text === 'string') parts.push(c.text);
-      }
-    }
-    text = parts.join('');
-  }
-  if (data.status === 'incomplete') {
-    text += '\n\n(응답이 길어 중간에 끊겼습니다. "이어서 작성해줘"라고 요청하세요.)';
-  }
-  return text;
+  recordUsage(provider, data.usage?.input ?? 0, data.usage?.output ?? 0);
+  refreshLimits(settings).catch(() => {});
+  return data.text ?? '';
 }
 
 export interface GeneratedImage {
@@ -176,42 +93,23 @@ export interface GeneratedImage {
 }
 
 export async function generateImage(settings: Settings, prompt: string): Promise<GeneratedImage> {
-  if (usesServer(settings)) {
-    const data = await callServer<{ base64?: string; usage?: ServerUsage }>(settings, '/v1/image', { prompt });
-    recordUsage('openai', data.usage?.input ?? 0, data.usage?.output ?? 0);
-    if (!data.base64) throw new Error('이미지 응답이 비어 있습니다.');
-    return { base64: data.base64 };
-  }
-  if (!settings.openaiKey) throw new Error('시안 이미지는 OpenAI API 키가 있어야 만들 수 있습니다.');
-  const res = await fetch('https://api.openai.com/v1/images/generations', {
-    method: 'POST',
-    headers: {
-      'content-type': 'application/json',
-      authorization: `Bearer ${settings.openaiKey}`,
-    },
-    body: JSON.stringify({ model: settings.imageModel, prompt, size: '1024x1536', n: 1 }),
-  });
-  recordRateHeaders('openai', res.headers);
-  if (!res.ok) throw new Error(`이미지 API 오류 (${res.status}): ${await readError(res)}`);
-  const data = await res.json();
-  recordUsage('openai', data.usage?.input_tokens ?? 0, data.usage?.output_tokens ?? 0);
-  const first = data.data?.[0];
-  if (first?.b64_json) return { base64: first.b64_json };
-  if (first?.url) return { url: first.url };
-  throw new Error('이미지 응답이 비어 있습니다.');
+  const data = await callServer<{ base64?: string; usage?: ServerUsage }>(settings, '/v1/image', { prompt });
+  recordUsage('openai', data.usage?.input ?? 0, data.usage?.output ?? 0);
+  if (!data.base64) throw new Error('이미지 응답이 비어 있습니다.');
+  return { base64: data.base64 };
 }
 
-/**
- * Providers only report remaining limits in response headers, so this sends the
- * smallest possible request (a few tokens) to refresh them.
- */
-export async function checkLimits(provider: Provider, settings: Settings, model: string): Promise<void> {
-  await chat({
-    provider,
-    model,
-    system: '짧게 답하세요.',
-    messages: [{ role: 'user', content: 'ping' }],
+/** 두 구독의 남은 한도를 맥미니 서버에서 받아 옵니다. */
+let lastLimitsAt = 0;
+
+export async function refreshLimits(settings: Settings, force = false): Promise<void> {
+  if (!settings.serverUrl.trim() || !settings.serverToken) return;
+  if (!force && Date.now() - lastLimitsAt < 60000) return;
+  lastLimitsAt = Date.now();
+  const data = await callServer<{ claude: LimitWindow[] | null; openai: LimitWindow[] | null }>(
     settings,
-    maxTokens: provider === 'claude' ? 1 : 16,
-  });
+    '/v1/limits',
+  );
+  recordLimits('claude', data.claude);
+  recordLimits('openai', data.openai);
 }

@@ -13,7 +13,7 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { sendToRoom } from '../../engine';
 import { FileCard } from '../../FileCard';
 import { ROLES, roleInfo } from '../../roles';
-import { useSettings } from '../../settings';
+import { useSettings, modelLabel } from '../../settings';
 import { useBusy, useProject } from '../../store';
 import { ChatMessage, RoleId } from '../../types';
 import { Button, colors } from '../../ui';
@@ -66,7 +66,7 @@ export default function Room() {
           <Text style={styles.intro}>
             {info.description}
             {'\n'}
-            {model.provider === 'claude' ? 'Claude' : 'OpenAI'} · {model.model}
+            {model.provider === 'claude' ? 'Claude' : 'ChatGPT'} · {modelLabel(model)}
           </Text>
         }
         ListFooterComponent={

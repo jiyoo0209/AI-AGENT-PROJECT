@@ -6,6 +6,7 @@ import { SafeAreaProvider } from 'react-native-safe-area-context';
 import { loadSettings } from '../settings';
 import { loadProject } from '../store';
 import { loadUsage } from '../usage';
+import { px } from '../pixel';
 import { colors } from '../ui';
 
 export default function RootLayout() {
@@ -25,16 +26,18 @@ export default function RootLayout() {
 
   return (
     <SafeAreaProvider>
-      <StatusBar style="dark" />
+      <StatusBar style="light" />
       <Stack
         screenOptions={{
-          headerStyle: { backgroundColor: colors.card },
-          headerTitleStyle: { fontWeight: '700' },
+          headerStyle: { backgroundColor: px.bg },
+          headerTintColor: px.cream,
+          headerTitleStyle: { fontWeight: '800' },
           contentStyle: { backgroundColor: colors.bg },
         }}
       >
-        <Stack.Screen name="index" options={{ title: 'AI 프로젝트매니저' }} />
+        <Stack.Screen name="index" options={{ title: '나만의사무실', headerShown: false }} />
         <Stack.Screen name="settings" options={{ title: '설정' }} />
+        <Stack.Screen name="energy" options={{ title: 'AI 에너지', contentStyle: { backgroundColor: px.bg } }} />
         <Stack.Screen name="files" options={{ title: '전체 산출물' }} />
         <Stack.Screen name="room/[role]" options={{ title: '채팅방' }} />
         <Stack.Screen name="viewer/[id]" options={{ title: '산출물 보기' }} />

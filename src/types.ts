@@ -68,14 +68,9 @@ export interface RoleModel {
 }
 
 export interface Settings {
-  /** 맥미니 서버 주소. 비어 있지 않으면 API 키 대신 서버(구독)로 AI를 호출합니다. */
+  /** 맥미니 서버 주소. 모든 AI 호출은 이 서버(구독)로 갑니다. */
   serverUrl: string;
   serverToken: string;
-  anthropicKey: string;
-  openaiKey: string;
-  imageModel: string;
   stepApproval: boolean;
-  /** Monthly token budget per provider; 0 means not set. */
-  monthlyTokenBudget: Record<Provider, number>;
   roles: Record<RoleId, RoleModel>;
 }

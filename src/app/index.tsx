@@ -1,48 +1,112 @@
 import { router, Stack } from 'expo-router';
-import { useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import {
   ActivityIndicator,
   Alert,
   Pressable,
   ScrollView,
+  type ScrollViewInstance,
   StyleSheet,
   Text,
   TextInput,
+  useWindowDimensions,
   View,
 } from 'react-native';
-import { replan, resetProject, runTasks, startProject, statusLabel } from '../engine';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
+import { replan, resetProject, runTasks, startProject } from '../engine';
+import { refreshLimits } from '../llm';
+import { AgentState, OfficeMap } from '../OfficeMap';
+import { EnergyBar, Panel, px, PxButton } from '../pixel';
 import { ROLES, roleInfo } from '../roles';
 import { useSettings } from '../settings';
 import { useBusy, useProject } from '../store';
-import { ProjectPhase, Task } from '../types';
-import { Badge, Button, Card, colors } from '../ui';
+import { Project, RoleId, Task } from '../types';
+import { energyColor, remainingPct, resetText, tightestWindow, useUsage } from '../usage';
 
-const PHASE: Record<ProjectPhase, { label: string; color: string }> = {
-  idle: { label: '대기', color: colors.sub },
-  planning: { label: 'PM 계획 중', color: colors.primary },
-  awaiting_approval: { label: '승인 대기', color: colors.warn },
-  running: { label: '실행 중', color: colors.primary },
-  paused: { label: '일시 정지', color: colors.warn },
-  done: { label: '완료', color: colors.success },
-};
+const NAMES = Object.fromEntries(ROLES.map((r) => [r.id, r.name])) as Record<RoleId, string>;
 
-const TASK_COLOR: Record<Task['status'], string> = {
-  pending: colors.sub,
-  running: colors.primary,
-  done: colors.success,
-  failed: colors.danger,
-};
+function short(text: string, n = 16): string {
+  return text.length > n ? text.slice(0, n) + '…' : text;
+}
+
+/** 프로젝트 상태로 팀원마다 지금 할 일(자리에서 일하기 · 대표실에서 결재 대기 · 쉬기)을 정합니다. */
+function agentStates(project: Project, busy: Partial<Record<RoleId, boolean>>): Record<RoleId, AgentState> {
+  const out = {} as Record<RoleId, AgentState>;
+  const running = project.tasks.find((t) => t.status === 'running');
+  const failed = project.tasks.find((t) => t.status === 'failed');
+  let lastDone: Task | undefined;
+  for (const t of project.tasks) {
+    if (t.status === 'done') lastDone = t;
+    if (t.status === 'pending') break;
+  }
+  for (const r of ROLES) {
+    const id = r.id;
+    if (busy[id]) {
+      let text = '답변 작성 중…';
+      if (running?.role === id) text = short(running.title) + ' 중…';
+      else if (id === 'pm' && project.phase === 'planning') text = '작업 계획 세우는 중…';
+      out[id] = { mode: 'work', text };
+    } else if (id === 'pm' && project.phase === 'awaiting_approval') {
+      out[id] = { mode: 'wait', text: `계획 결재 대기 (작업 ${project.tasks.filter((t) => t.status === 'pending').length}개)` };
+    } else if (project.phase === 'paused' && failed?.role === id) {
+      out[id] = { mode: 'wait', text: '문제가 생겼어요' };
+    } else if (project.phase === 'paused' && !failed && lastDone?.role === id) {
+      out[id] = { mode: 'wait', text: `결재 대기 · ${short(lastDone.title, 12)}` };
+    } else if (project.phase === 'done' && id === 'pm') {
+      out[id] = { mode: 'idle', text: '프로젝트 완료!' };
+    } else {
+      out[id] = { mode: 'idle' };
+    }
+  }
+  return out;
+}
+
+function EnergyChip(props: { name: string; provider: 'claude' | 'openai' }) {
+  const usage = useUsage();
+  const limits = usage.limits[props.provider];
+  const pct = remainingPct(limits);
+  const tight = tightestWindow(limits);
+  const color = energyColor(pct);
+  return (
+    <Pressable onPress={() => router.push('/energy')} style={{ flex: 1 }} accessibilityRole="button">
+      <Panel style={{ flex: 1 }}>
+        <View style={styles.chipHead}>
+          <Text style={styles.chipName}>{props.name} 에너지</Text>
+          <Text style={[styles.chipPct, { color }]}>{pct === undefined ? '—' : `${pct}%`}</Text>
+        </View>
+        <EnergyBar pct={pct} color={color} />
+        <Text style={styles.chipSub} numberOfLines={1}>
+          {tight ? `${tight.label} 한도 · ${resetText(tight.resetsAt) || '여유'}` : '아직 확인 전'}
+        </Text>
+      </Panel>
+    </Pressable>
+  );
+}
 
 export default function Home() {
   const project = useProject();
   const settings = useSettings();
   const busy = useBusy();
+  const insets = useSafeAreaInsets();
+  const { width } = useWindowDimensions();
   const [request, setRequest] = useState('');
+  const scrollRef = useRef<ScrollViewInstance>(null);
+  const [panelY, setPanelY] = useState(0);
 
-  const needsKeys = !settings.serverUrl && !settings.anthropicKey && !settings.openaiKey;
-  const phase = PHASE[project.phase];
-  const pending = project.tasks.filter((t) => t.status === 'pending').length;
-  const hasFailed = project.tasks.some((t) => t.status === 'failed');
+  useEffect(() => {
+    refreshLimits(settings).catch(() => {});
+  }, [settings]);
+
+  const needsServer = !settings.serverUrl || !settings.serverToken;
+  const pending = project.tasks.filter((t) => t.status === 'pending');
+  const done = project.tasks.filter((t) => t.status === 'done').length;
+  const failed = project.tasks.find((t) => t.status === 'failed');
+  const running = project.tasks.find((t) => t.status === 'running');
+  let lastDone: Task | undefined;
+  for (const t of project.tasks) {
+    if (t.status === 'done') lastDone = t;
+    if (t.status === 'pending') break;
+  }
 
   const start = () => {
     const text = request.trim();
@@ -59,189 +123,260 @@ export default function Home() {
 
   return (
     <>
-      <Stack.Screen
-        options={{
-          headerRight: () => (
-            <Pressable onPress={() => router.push('/settings')} hitSlop={10}>
-              <Text style={styles.headerLink}>설정</Text>
+      <Stack.Screen options={{ headerShown: false }} />
+      <ScrollView
+        ref={scrollRef}
+        style={{ backgroundColor: px.bg }}
+        contentContainerStyle={{ paddingTop: insets.top + 8, paddingBottom: insets.bottom + 24 }}
+        keyboardShouldPersistTaps="handled"
+      >
+        <View style={styles.pad}>
+          <View style={styles.titleRow}>
+            <Text style={styles.title}>나만의사무실</Text>
+            <Pressable
+              onPress={() => router.push('/settings')}
+              accessibilityRole="button"
+              accessibilityLabel="설정"
+              style={styles.iconBtn}
+            >
+              <Text style={styles.iconText}>설정</Text>
             </Pressable>
-          ),
-        }}
-      />
-      <ScrollView contentContainerStyle={styles.container} keyboardShouldPersistTaps="handled">
-        {needsKeys && (
-          <Pressable onPress={() => router.push('/settings')}>
-            <Card style={styles.warn}>
-              <Text style={styles.warnText}>
-                설정에서 맥미니 서버 주소(또는 API 키)를 입력해야 AI 팀원이 일할 수 있습니다. 눌러서 이동
+          </View>
+
+          <View style={styles.chips}>
+            <EnergyChip name="Claude" provider="claude" />
+            <EnergyChip name="ChatGPT" provider="openai" />
+          </View>
+
+          <View style={styles.projectRow}>
+            <Text style={styles.projectText} numberOfLines={1}>
+              {project.request ? `진행 중 · ${project.request}` : '새 프로젝트를 기다리는 중'}
+            </Text>
+            {project.tasks.length > 0 && (
+              <Text style={styles.progress}>
+                {done}/{project.tasks.length}
               </Text>
-            </Card>
-          </Pressable>
-        )}
-
-        {project.phase === 'idle' && !project.request ? (
-          <Card>
-            <Text style={styles.title}>무엇을 만들까요?</Text>
-            <Text style={styles.sub}>요청을 적으면 PM이 팀원에게 일을 나눠 계획을 세웁니다. 승인하면 실행합니다.</Text>
-            <TextInput
-              style={styles.input}
-              value={request}
-              onChangeText={setRequest}
-              placeholder="예: 동네 헬스장 회원 관리 앱. 회원 등록, 출석 체크, 이용권 만료 알림이 필요해."
-              multiline
-              textAlignVertical="top"
-            />
-            <Button title="PM에게 맡기기" onPress={start} disabled={!request.trim()} />
-          </Card>
-        ) : (
-          <Card>
-            <View style={styles.row}>
-              <Text style={styles.title}>프로젝트</Text>
-              <Badge label={phase.label} color={phase.color} />
-            </View>
-            <Text style={styles.request}>{project.request}</Text>
-            {!!project.planSummary && <Text style={styles.summary}>{project.planSummary}</Text>}
-
-            {project.phase === 'planning' && (
-              <View style={styles.row}>
-                <ActivityIndicator color={colors.primary} />
-                <Text style={styles.sub}>PM이 계획을 세우고 있습니다…</Text>
-              </View>
             )}
+          </View>
+        </View>
 
-            {project.tasks.map((t, i) => (
-              <Pressable key={t.id} style={styles.task} onPress={() => router.push(`/room/${t.role}`)}>
-                <Text style={styles.taskIndex}>{i + 1}</Text>
-                <View style={{ flex: 1 }}>
-                  <Text style={styles.taskTitle}>
-                    [{roleInfo(t.role).name}] {t.title}
+        <View style={styles.mapFrame}>
+          <OfficeMap
+            width={width}
+            agents={agentStates(project, busy)}
+            names={NAMES}
+            onPressAgent={(r) => router.push(`/room/${r}`)}
+            onPressCeo={() => scrollRef.current?.scrollTo({ y: Math.max(0, panelY - 40), animated: true })}
+          />
+        </View>
+
+        <View style={[styles.pad, { gap: 10, marginTop: 10 }]} onLayout={(e) => setPanelY(e.nativeEvent.layout.y)}>
+          {needsServer && (
+            <Pressable onPress={() => router.push('/settings')}>
+              <Panel accent>
+                <Text style={styles.warn}>설정에서 맥미니 서버 주소와 토큰을 입력해야 팀원들이 일할 수 있어요. 눌러서 이동</Text>
+              </Panel>
+            </Pressable>
+          )}
+
+          {project.phase === 'idle' && !project.request && (
+            <Panel accent>
+              <Text style={styles.boxTitle}>▶ PM에게 지시하기</Text>
+              <TextInput
+                style={styles.input}
+                value={request}
+                onChangeText={setRequest}
+                placeholder="예: 회의실 예약 앱 기획부터 시작해줘"
+                placeholderTextColor="#8F8BAE"
+                multiline
+                textAlignVertical="top"
+              />
+              <PxButton title="보내기" onPress={start} disabled={!request.trim() || needsServer} />
+            </Panel>
+          )}
+
+          {project.phase === 'planning' && (
+            <Panel accent>
+              <View style={styles.rowGap}>
+                <ActivityIndicator color={px.gold} />
+                <Text style={styles.boxText}>PM이 작업 계획을 세우고 있어요…</Text>
+              </View>
+            </Panel>
+          )}
+
+          {project.phase === 'awaiting_approval' && (
+            <Panel accent>
+              <Text style={styles.boxTitle}>대표실 결재 · PM의 작업 계획</Text>
+              {!!project.planSummary && <Text style={styles.boxText}>{project.planSummary}</Text>}
+              {pending.map((t, i) => (
+                <Pressable key={t.id} onPress={() => router.push(`/room/${t.role}`)} style={styles.taskRow}>
+                  <Text style={styles.taskNo}>{i + 1}</Text>
+                  <Text style={[styles.taskRole, { color: roleInfo(t.role).color }]}>{roleInfo(t.role).name}</Text>
+                  <Text style={styles.taskTitle} numberOfLines={2}>
+                    {t.title}
                   </Text>
-                  {!!t.error && (
-                    <Text style={styles.taskError} numberOfLines={2}>
-                      {t.error}
+                </Pressable>
+              ))}
+              <View style={styles.actions}>
+                <PxButton title="다시 계획" variant="dark" onPress={replan} />
+                <PxButton title={`승인하고 시작 (${pending.length}개)`} onPress={runTasks} style={{ flex: 1 }} />
+              </View>
+            </Panel>
+          )}
+
+          {project.phase === 'running' && (
+            <Panel accent>
+              <View style={styles.rowGap}>
+                <ActivityIndicator color={px.mint} />
+                <Text style={styles.boxText}>
+                  {running ? `${roleInfo(running.role).name}: ${running.title}` : '작업 진행 중…'}
+                </Text>
+              </View>
+            </Panel>
+          )}
+
+          {project.phase === 'paused' && (
+            <Panel accent>
+              {failed ? (
+                <>
+                  <Text style={styles.boxTitle}>대표실 보고 · 작업이 멈췄어요</Text>
+                  <Text style={styles.boxText}>
+                    {roleInfo(failed.role).name}: {failed.title}
+                  </Text>
+                  {!!failed.error && (
+                    <Text style={styles.error} numberOfLines={3}>
+                      {failed.error}
                     </Text>
                   )}
-                </View>
-                {t.status === 'running' ? (
-                  <ActivityIndicator color={colors.primary} />
-                ) : (
-                  <Badge label={statusLabel(t.status)} color={TASK_COLOR[t.status]} />
-                )}
+                  <View style={styles.actions}>
+                    <PxButton title="다시 계획" variant="dark" onPress={replan} />
+                    <PxButton title="다시 시도" onPress={runTasks} style={{ flex: 1 }} />
+                  </View>
+                </>
+              ) : (
+                <>
+                  <Text style={styles.boxTitle}>대표실 결재 · {lastDone ? roleInfo(lastDone.role).name : '팀원'}</Text>
+                  <Text style={styles.boxText}>
+                    {lastDone ? `"${lastDone.title}" 완료했어요. 확인하고 다음 작업을 승인해 주세요.` : '다음 작업 승인을 기다려요.'}
+                  </Text>
+                  <View style={styles.actions}>
+                    {lastDone && (
+                      <PxButton title="결과 보기" variant="dark" onPress={() => router.push(`/room/${lastDone.role}`)} />
+                    )}
+                    <PxButton title={`승인 (${pending.length}개 남음)`} onPress={runTasks} style={{ flex: 1 }} />
+                  </View>
+                </>
+              )}
+            </Panel>
+          )}
+
+          {project.phase === 'done' && (
+            <Panel accent>
+              <Text style={styles.boxTitle}>프로젝트 완료</Text>
+              <Text style={styles.boxText}>PM의 완료 보고는 PM 채팅방에서 볼 수 있어요.</Text>
+              <View style={styles.actions}>
+                <PxButton title="PM에게 추가 요청" variant="dark" onPress={() => router.push('/room/pm')} style={{ flex: 1 }} />
+              </View>
+            </Panel>
+          )}
+
+          {project.phase === 'idle' && !!project.request && (
+            <Panel accent>
+              <Text style={styles.boxText}>PM이 계획을 만들지 못했어요. PM 채팅방에서 다시 요청해 보세요.</Text>
+              <View style={styles.actions}>
+                <PxButton title="PM 채팅방" variant="dark" onPress={() => router.push('/room/pm')} style={{ flex: 1 }} />
+              </View>
+            </Panel>
+          )}
+
+          <Text style={styles.section}>팀원 채팅방</Text>
+          <View style={styles.roomGrid}>
+            {ROLES.map((r) => (
+              <Pressable key={r.id} onPress={() => router.push(`/room/${r.id}`)} style={styles.roomChip}>
+                <View style={[styles.roomDot, { backgroundColor: r.color }]} />
+                <Text style={styles.roomName}>{r.name}</Text>
+                {busy[r.id] && <ActivityIndicator size="small" color={px.mint} />}
               </Pressable>
             ))}
+          </View>
 
-            <View style={styles.actions}>
-              {project.phase === 'awaiting_approval' && (
-                <>
-                  <Button title={`승인하고 실행 (${pending}개)`} onPress={runTasks} style={{ flex: 1 }} />
-                  <Button title="다시 계획" variant="secondary" onPress={replan} />
-                </>
-              )}
-              {project.phase === 'paused' && (
-                <>
-                  <Button
-                    title={hasFailed ? '실패한 작업 다시 시도' : `다음 작업 승인 (${pending}개 남음)`}
-                    onPress={runTasks}
-                    style={{ flex: 1 }}
-                  />
-                  <Button title="다시 계획" variant="secondary" onPress={replan} />
-                </>
-              )}
-              {project.phase === 'done' && (
-                <Button title="PM에게 추가 요청" variant="secondary" onPress={() => router.push('/room/pm')} style={{ flex: 1 }} />
-              )}
-            </View>
-            {project.phase !== 'running' && project.phase !== 'planning' && (
-              <Button title="새 프로젝트" variant="secondary" small onPress={confirmReset} style={{ marginTop: 8 }} />
+          <View style={styles.nav}>
+            <PxButton title={`산출물 ${project.deliverables.length}`} variant="dark" onPress={() => router.push('/files')} style={{ flex: 1 }} />
+            <PxButton title="에너지" variant="dark" onPress={() => router.push('/energy')} style={{ flex: 1 }} />
+            {project.phase !== 'running' && project.phase !== 'planning' && !!project.request && (
+              <PxButton title="새 프로젝트" variant="dark" onPress={confirmReset} style={{ flex: 1 }} />
             )}
-          </Card>
-        )}
-
-        <View style={styles.sectionHeader}>
-          <Text style={styles.section}>채팅방</Text>
-          <Pressable onPress={() => router.push('/files')}>
-            <Text style={styles.headerLink}>전체 산출물 {project.deliverables.length}개</Text>
-          </Pressable>
+          </View>
         </View>
-        {ROLES.map((r) => {
-          const msgs = project.messages.filter((m) => m.role === r.id);
-          const last = msgs[msgs.length - 1];
-          const fileCount = project.deliverables.filter((d) => d.role === r.id).length;
-          const model = settings.roles[r.id];
-          return (
-            <Pressable key={r.id} onPress={() => router.push(`/room/${r.id}`)}>
-              <Card style={styles.room}>
-                <View style={[styles.avatar, { backgroundColor: r.color }]}>
-                  <Text style={styles.avatarText}>{r.name.slice(0, 2)}</Text>
-                </View>
-                <View style={{ flex: 1 }}>
-                  <View style={styles.row}>
-                    <Text style={styles.roomName}>{r.name}</Text>
-                    <Text style={styles.model}>
-                      {model.provider === 'claude' ? 'Claude' : 'OpenAI'} · {model.model}
-                    </Text>
-                  </View>
-                  <Text style={styles.sub} numberOfLines={1}>
-                    {busy[r.id] ? '작성 중…' : last ? last.text : r.description}
-                  </Text>
-                </View>
-                {busy[r.id] ? (
-                  <ActivityIndicator color={r.color} />
-                ) : fileCount > 0 ? (
-                  <Badge label={`파일 ${fileCount}`} color={r.color} />
-                ) : null}
-              </Card>
-            </Pressable>
-          );
-        })}
       </ScrollView>
     </>
   );
 }
 
 const styles = StyleSheet.create({
-  container: { padding: 16, gap: 12, paddingBottom: 40 },
-  headerLink: { color: colors.primary, fontSize: 15, fontWeight: '600' },
-  warn: { backgroundColor: '#FFFBEB', borderColor: '#FDE68A' },
-  warnText: { color: '#92400E', fontSize: 14 },
-  title: { fontSize: 18, fontWeight: '700', color: colors.text },
-  sub: { fontSize: 13, color: colors.sub, marginTop: 4 },
+  pad: { paddingHorizontal: 12 },
+  titleRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' },
+  title: { color: px.cream, fontSize: 21, fontWeight: '900' },
+  iconBtn: {
+    minWidth: 52,
+    height: 40,
+    paddingHorizontal: 10,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: px.panel,
+    borderWidth: 2,
+    borderColor: px.ink,
+  },
+  iconText: { color: px.cream, fontWeight: '800', fontSize: 13 },
+  chips: { flexDirection: 'row', gap: 8, marginTop: 10 },
+  chipHead: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 5 },
+  chipName: { color: px.cream, fontSize: 12, fontWeight: '800' },
+  chipPct: { fontSize: 18, fontWeight: '900' },
+  chipSub: { color: px.sub, fontSize: 11, marginTop: 5 },
+  projectRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: 8, marginVertical: 10 },
+  projectText: { color: px.cream, fontSize: 13, fontWeight: '700', flex: 1 },
+  progress: { color: px.gold, fontSize: 13, fontWeight: '900' },
+  mapFrame: { borderTopWidth: 3, borderBottomWidth: 3, borderColor: px.ink },
+  warn: { color: px.gold, fontSize: 13, fontWeight: '700', lineHeight: 19 },
+  boxTitle: { color: px.gold, fontSize: 13, fontWeight: '900', marginBottom: 6 },
+  boxText: { color: px.cream, fontSize: 13, lineHeight: 19, flexShrink: 1 },
+  error: { color: px.coral, fontSize: 12, marginTop: 6 },
+  rowGap: { flexDirection: 'row', alignItems: 'center', gap: 10 },
   input: {
-    minHeight: 110,
-    borderWidth: 1,
-    borderColor: colors.border,
-    borderRadius: 10,
-    padding: 12,
-    marginVertical: 12,
-    fontSize: 15,
-    color: colors.text,
+    minHeight: 80,
+    backgroundColor: px.bg,
+    borderWidth: 2,
+    borderColor: px.line,
+    color: px.cream,
+    padding: 10,
+    fontSize: 14,
+    marginBottom: 8,
   },
-  row: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: 8 },
-  request: { fontSize: 14, color: colors.text, marginTop: 8 },
-  summary: { fontSize: 13, color: colors.sub, marginTop: 8, lineHeight: 19 },
-  task: {
+  taskRow: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 10,
-    paddingVertical: 10,
+    gap: 8,
+    paddingVertical: 8,
     borderTopWidth: 1,
-    borderTopColor: colors.border,
-    marginTop: 8,
+    borderTopColor: px.line,
   },
-  taskIndex: { width: 20, textAlign: 'center', color: colors.sub, fontWeight: '700' },
-  taskTitle: { fontSize: 14, color: colors.text },
-  taskError: { fontSize: 12, color: colors.danger, marginTop: 2 },
-  actions: { flexDirection: 'row', gap: 8, marginTop: 12 },
-  sectionHeader: {
+  taskNo: { color: px.sub, width: 16, fontWeight: '800', textAlign: 'center' },
+  taskRole: { fontSize: 12, fontWeight: '900', width: 52 },
+  taskTitle: { color: px.cream, fontSize: 13, flex: 1 },
+  actions: { flexDirection: 'row', gap: 8, marginTop: 10 },
+  section: { color: px.gold, fontSize: 12, fontWeight: '900', marginTop: 4 },
+  roomGrid: { flexDirection: 'row', flexWrap: 'wrap', gap: 6 },
+  roomChip: {
     flexDirection: 'row',
-    justifyContent: 'space-between',
     alignItems: 'center',
-    marginTop: 8,
+    gap: 6,
+    minHeight: 40,
+    paddingHorizontal: 10,
+    backgroundColor: px.panel,
+    borderWidth: 2,
+    borderColor: px.ink,
   },
-  section: { fontSize: 16, fontWeight: '700', color: colors.text },
-  room: { flexDirection: 'row', alignItems: 'center', gap: 12, padding: 12 },
-  avatar: { width: 42, height: 42, borderRadius: 21, alignItems: 'center', justifyContent: 'center' },
-  avatarText: { color: '#fff', fontWeight: '700', fontSize: 13 },
-  roomName: { fontSize: 15, fontWeight: '700', color: colors.text },
-  model: { fontSize: 11, color: colors.sub, flexShrink: 1 },
+  roomDot: { width: 8, height: 8 },
+  roomName: { color: px.cream, fontSize: 13, fontWeight: '700' },
+  nav: { flexDirection: 'row', gap: 6, marginTop: 4 },
 });
