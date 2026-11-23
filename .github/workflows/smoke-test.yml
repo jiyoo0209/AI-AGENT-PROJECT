@@ -48,7 +48,7 @@ jobs:
       - name: Show crash log
         if: always()
         run: |
-          grep -n -A40 "FATAL EXCEPTION\|AndroidRuntime\|ReactNativeJS\|E unknown:ReactNative\|SoLoader" logcat.txt | head -300 || true
+          grep -E " E AndroidRuntime| F DEBUG|ReactNativeJS|ReactNative|unknown:|Expo|expo\.|aiagentproject|libc +:" logcat.txt | grep -vE "Telephony|NetworkRequest|ConnectivityService|PackageManager|pm_|BackupManager" | cut -c1-400 | head -150 || true
 
       - name: Upload log
         if: always()
