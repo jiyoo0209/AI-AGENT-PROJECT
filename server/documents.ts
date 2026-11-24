@@ -7,6 +7,7 @@
 //   pandoc (Word), LibreOffice(soffice, PDF 변환), poppler(pdftoppm, 페이지 이미지), Google Chrome(화면 캡처)
 
 import { execFile } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { basename, join } from 'node:path';
 import { pathToFileURL } from 'node:url';
@@ -17,6 +18,8 @@ import { marked, type Token, type Tokens } from 'marked';
 import PptxGenJS from 'pptxgenjs';
 
 const run = promisify(execFile);
+// 흐름도 도구(Mermaid). MERMAID_URL 환경 변수로 다른 주소(사내 미러 등)를 쓸 수 있습니다.
+const MERMAID_URL = process.env.MERMAID_URL || 'https://cdn.jsdelivr.net/npm/mermaid@12/dist/mermaid.min.js';
 
 export type DocKind = 'docx' | 'xlsx' | 'pptx';
 
@@ -236,6 +239,7 @@ async function buildXlsx(md: string, out: string, title: string) {
 interface SlideSpec {
   title: string;
   image?: string;
+  diagram?: string; // ```mermaid 코드
   bullets: { runs: Run[]; level: number }[];
   table?: string[][];
   notes: string[];
@@ -243,12 +247,13 @@ interface SlideSpec {
 
 /**
  * 슬라이드는 '---' 줄이나 #, ## 제목으로 나눕니다.
- * 슬라이드 안의 ![](파일명) 이미지는 왼쪽에, 목록·표·문단은 오른쪽(이미지가 없으면 전체)에 둡니다.
+ * 슬라이드 안의 ![](파일명) 이미지나 ```mermaid 흐름도는 왼쪽에, 목록·표·문단은 오른쪽(이미지가 없으면 전체)에 둡니다.
+ * 글이 없는 흐름도 슬라이드는 흐름도를 전체 폭으로 그립니다.
  */
 function slidesFrom(md: string, fallbackTitle: string): SlideSpec[] {
   const slides: SlideSpec[] = [];
   let cur: SlideSpec | null = null;
-  const empty = (s: SlideSpec) => !s.bullets.length && !s.image && !s.table;
+  const empty = (s: SlideSpec) => !s.bullets.length && !s.image && !s.diagram && !s.table;
   const ensure = (): SlideSpec => {
     if (!cur) {
       cur = { title: '', bullets: [], notes: [] };
@@ -291,6 +296,9 @@ function slidesFrom(md: string, fallbackTitle: string): SlideSpec[] {
       if (imgs.length && !s.image) s.image = imgs[0];
       const text = runsOf(p.tokens);
       if (text.some((r) => r.text.trim())) s.bullets.push({ runs: text, level: -1 });
+    } else if (t.type === 'code' && (t as Tokens.Code).lang?.trim().toLowerCase() === 'mermaid') {
+      const s = ensure();
+      if (!s.diagram) s.diagram = (t as Tokens.Code).text;
     } else if (t.type === 'blockquote') {
       const text = plain((t as Tokens.Blockquote).tokens);
       if (text) ensure().notes.push(text);
@@ -324,7 +332,13 @@ function tableHeight(table: string[][], pt: number, widthIn: number): number {
   return table.reduce((h, row) => h + (Math.max(...row.map((c) => linesFor(c, pt, colW))) * pt * 1.25) / 72 + 0.1, 0);
 }
 
-async function buildPptx(md: string, out: string, title: string, resolveImage: (ref: string) => Promise<string | null>) {
+async function buildPptx(
+  md: string,
+  out: string,
+  title: string,
+  resolveImage: (ref: string) => Promise<string | null>,
+  renderDiagram: (code: string) => Promise<string | null>,
+) {
   const pptx = new PptxGenJS();
   pptx.layout = 'LAYOUT_WIDE'; // 13.33 x 7.5 in
   pptx.title = title;
@@ -345,33 +359,46 @@ async function buildPptx(md: string, out: string, title: string, resolveImage: (
 
     let textX = 0.5;
     let textW = W - 1;
-    if (s.image) {
-      const path = await resolveImage(s.image).catch(() => null);
+    if (s.image || s.diagram) {
+      const path = s.image
+        ? await resolveImage(s.image).catch(() => null)
+        : await renderDiagram(s.diagram!).catch(() => null);
+      // 글이 없는 흐름도는 전체 폭, 그 밖에는 왼쪽 5.6in 상자에 놓습니다.
+      const fullWidth = !s.image && !s.bullets.length && !s.table;
+      const boxW = fullWidth ? W - 1 : 5.6;
+      const boxH = 5.6;
       if (path) {
-        // 이미지 비율을 지켜 왼쪽 상자(5.6 x 5.6in) 가운데에 놓습니다.
-        const box = 5.6;
-        let w = box;
-        let h = box;
+        // 이미지 비율을 지켜 상자 가운데에 놓습니다.
+        let w = boxW;
+        let h = boxH;
         try {
           const sharp = (await import('sharp')).default;
           const m = await sharp(path).metadata();
           if (m.width && m.height) {
             const r = m.width / m.height;
-            if (r >= 1) h = box / r;
-            else w = box * r;
+            if (r >= boxW / boxH) h = boxW / r;
+            else w = boxH * r;
           }
         } catch {
           // 크기를 모르면 상자에 맞춤
         }
-        slide.addImage({ path, x: 0.5 + (box - w) / 2, y: 1.25 + (box - h) / 2, w, h });
+        slide.addImage({ path, x: 0.5 + (boxW - w) / 2, y: 1.25 + (boxH - h) / 2, w, h });
+      } else if (s.diagram) {
+        slide.addShape(pptx.ShapeType.rect, { x: 0.5, y: 1.25, w: boxW, h: boxH, fill: { color: 'F3F4F6' }, line: { color: 'D1D5DB', dashType: 'dash' } });
+        slide.addText('흐름도를 그리지 못했어요.\n원본은 슬라이드 노트에 있어요.', {
+          x: 0.5, y: 1.25, w: boxW, h: boxH, align: 'center', fontFace: font, fontSize: 12, color: '6B7280',
+        });
+        s.notes.push(s.diagram);
       } else {
         slide.addShape(pptx.ShapeType.rect, { x: 0.5, y: 1.25, w: 5.6, h: 5.6, fill: { color: 'F3F4F6' }, line: { color: 'D1D5DB', dashType: 'dash' } });
         slide.addText(`화면 이미지 준비 중\n${s.image}\n(퍼블리셔가 화면을 만들면 자동으로 채워져요)`, {
           x: 0.5, y: 1.25, w: 5.6, h: 5.6, align: 'center', fontFace: font, fontSize: 12, color: '6B7280',
         });
       }
-      textX = 6.4;
-      textW = W - 6.9;
+      if (!fullWidth) {
+        textX = 6.4;
+        textW = W - 6.9;
+      }
     }
 
     let y = 1.3;
@@ -555,7 +582,7 @@ export function createDocuments(dataDir: string) {
       opts: { title: string; resourceDirs: string[]; resolveImage: (ref: string) => Promise<string | null> },
     ) {
       if (kind === 'xlsx') return withTimeout(buildXlsx(md, out, opts.title), 60_000, 'Excel 만들기');
-      if (kind === 'pptx') return withTimeout(buildPptx(md, out, opts.title, opts.resolveImage), 120_000, 'PPT 만들기');
+      if (kind === 'pptx') return withTimeout(buildPptx(md, out, opts.title, opts.resolveImage, renderDiagram), 180_000, 'PPT 만들기');
       if (!pandoc) throw new Error('맥미니에 pandoc이 없어 Word 파일을 만들 수 없어요. (brew install pandoc)');
       const ref = await makeReferenceDocx(pandoc, work);
       const src = join(work, `${basename(out)}.${Date.now()}.md`);
@@ -629,6 +656,39 @@ export function createDocuments(dataDir: string) {
     shotPath,
   };
 
+  /** ```mermaid 흐름도를 Chrome으로 그려 PNG 경로를 돌려줍니다. 같은 내용은 다시 그리지 않습니다. */
+  async function renderDiagram(code: string): Promise<string | null> {
+    const dir = join(work, 'diagrams');
+    mkdirSync(dir, { recursive: true });
+    const out = join(dir, `${createHash('sha1').update(code).digest('hex')}.png`);
+    if (existsSync(out)) return out;
+    const b = await getBrowser();
+    if (!b) return null;
+    const page = await b.newPage({ viewport: { width: 1600, height: 900 }, deviceScaleFactor: 2 });
+    try {
+      await page.setContent('<!doctype html><html><body style="margin:0;background:#fff"><div id="c" style="display:inline-block;padding:16px"></div></body></html>');
+      await withTimeout(page.addScriptTag({ url: MERMAID_URL }), 20_000, '흐름도 도구 받기');
+      await withTimeout(
+        page.evaluate(async (src) => {
+          const m = (globalThis as unknown as { mermaid: { initialize(c: object): void; render(id: string, s: string): Promise<{ svg: string }> } }).mermaid;
+          m.initialize({ startOnLoad: false, theme: 'neutral', fontFamily: '"Apple SD Gothic Neo", "Malgun Gothic", "Noto Sans KR", sans-serif' });
+          const { svg } = await m.render('flow', src);
+          document.getElementById('c')!.innerHTML = svg;
+        }, code),
+        20_000,
+        '흐름도 그리기',
+      );
+      await page.locator('#c').screenshot({ path: out + '.tmp.png' });
+      renameSync(out + '.tmp.png', out);
+      return out;
+    } catch (e) {
+      console.error('[docs] 흐름도 그리기 실패:', e instanceof Error ? e.message : e);
+      return null;
+    } finally {
+      await page.close().catch(() => {});
+    }
+  }
+
   async function takeShot(id: string, htmlFile: string): Promise<string | null> {
     const b = await getBrowser();
     if (!b) return null;
@@ -637,7 +697,9 @@ export function createDocuments(dataDir: string) {
     const page = await b.newPage({ viewport: { width: 390, height: 844 }, deviceScaleFactor: 2 });
     try {
       await withTimeout(page.goto(pathToFileURL(htmlFile).href, { waitUntil: 'load' }), 20_000, '화면 열기');
-      await page.waitForTimeout(500);
+      // Tailwind·daisyUI·Alpine을 CDN에서 받아 스타일을 입힐 때까지 기다립니다.
+      await page.waitForLoadState('networkidle', { timeout: 8_000 }).catch(() => {});
+      await page.waitForTimeout(700);
       await page.screenshot({ path: out + '.tmp.png' });
       renameSync(out + '.tmp.png', out);
       await sharpReady;
