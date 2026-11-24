@@ -379,6 +379,16 @@ function localKoreanFont(): string | null {
   const home = process.env.HOME ?? '';
   const has = (...files: string[]) => files.some((f) => existsSync(f));
   if (has('/Library/Fonts/malgun.ttf', join(home, 'Library/Fonts/malgun.ttf'), '/usr/share/fonts/truetype/malgun.ttf')) return null;
+  // 나눔고딕은 PDF에 글꼴을 넣을 수 있어 가장 확실합니다 (brew install --cask font-nanum-gothic).
+  // 맥 시스템 글꼴(Apple SD Gothic Neo)은 PDF에 들어가지 않아 미리보기 이미지에서 글자가 빠질 수 있어요.
+  const nanum = [join(home, 'Library/Fonts'), '/Library/Fonts', '/usr/share/fonts/truetype/nanum'].some((d) => {
+    try {
+      return readdirSync(d).some((f) => /^NanumGothic(-Regular)?\.(ttf|otf)$/i.test(f));
+    } catch {
+      return false;
+    }
+  });
+  if (nanum) return 'NanumGothic';
   if (has('/System/Library/Fonts/AppleSDGothicNeo.ttc')) return 'Apple SD Gothic Neo';
   if (has('/System/Library/Fonts/Supplemental/AppleGothic.ttf')) return 'AppleGothic';
   if (has('/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc', '/usr/share/fonts/noto-cjk/NotoSansCJK-Regular.ttc')) return 'Noto Sans CJK KR';
@@ -432,6 +442,7 @@ export function createDocuments(dataDir: string) {
   const pandoc = findTool(['pandoc']);
   const soffice = findTool(['soffice', 'libreoffice'], ['/Applications/LibreOffice.app/Contents/MacOS/soffice']);
   const pdftoppm = findTool(['pdftoppm']);
+  const pdffonts = findTool(['pdffonts']);
   console.log(
     `[docs] Word: ${pandoc ? '사용' : '없음 (brew install pandoc)'} · PDF 미리보기: ${
       soffice && pdftoppm ? '사용' : '없음 (brew install --cask libreoffice && brew install poppler)'
@@ -532,6 +543,13 @@ export function createDocuments(dataDir: string) {
         );
         const pdf = join(dir, 'doc.pdf');
         if (!existsSync(pdf)) throw new Error('PDF 변환 결과가 없어요.');
+        // PDF에 들어가지 않은 글꼴은 미리보기 이미지에서 글자가 빠집니다. 원인을 찾을 수 있게 로그에 남깁니다.
+        if (pdffonts) {
+          const { stdout } = await run(pdffonts, [pdf], { timeout: 30_000 }).catch(() => ({ stdout: '' }));
+          const rows = stdout.split('\n').slice(2).filter((l) => l.trim());
+          const missing = rows.filter((l) => / no +(yes|no) +(yes|no) +\d+/.test(l)).map((l) => l.split(/\s+/)[0]);
+          console.log(`[docs] PDF 글꼴: ${rows.map((l) => l.split(/\s+/)[0]).join(', ') || '(없음)'}${missing.length ? ` · PDF에 안 들어간 글꼴: ${missing.join(', ')}` : ''}`);
+        }
         await run(pdftoppm, ['-r', '110', '-png', '-l', '40', pdf, join(dir, 'page')], { timeout: 120_000 });
         const pages = readdirSync(dir)
           .filter((f) => /^page-\d+\.png$/.test(f))
