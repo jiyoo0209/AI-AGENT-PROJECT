@@ -10,6 +10,7 @@ import * as TaskManager from 'expo-task-manager';
 import { AppState } from 'react-native';
 import { callServer } from './llm';
 import { getSettings, loadSettings } from './settings';
+import { setCurrentProject } from './store';
 
 const TASK = 'office-check';
 const CHANNEL = 'approval';
@@ -17,7 +18,7 @@ const SEEN_KEY = 'attention.seen';
 const PUSH_KEY = 'push.ok';
 
 interface AttentionOnly {
-  attention: { id: string; title: string; body: string } | null;
+  attention: { id: string; title: string; body: string; projectId?: string; projectName?: string } | null;
 }
 
 Notifications.setNotificationHandler({
@@ -41,7 +42,11 @@ TaskManager.defineTask(TASK, async () => {
     const { attention } = await callServer<AttentionOnly>(settings, '/v1/state');
     if (attention && attention.id !== (await AsyncStorage.getItem(SEEN_KEY))) {
       await Notifications.scheduleNotificationAsync({
-        content: { title: attention.title, body: attention.body, data: { attentionId: attention.id } },
+        content: {
+          title: attention.projectName ? `[${attention.projectName}] ${attention.title}` : attention.title,
+          body: attention.body,
+          data: { attentionId: attention.id, projectId: attention.projectId ?? '' },
+        },
         trigger: { channelId: CHANNEL },
       });
       await AsyncStorage.setItem(SEEN_KEY, attention.id);
@@ -70,6 +75,17 @@ export async function setupNotifications(): Promise<void> {
     }
   } catch {
     // 백그라운드 작업을 못 쓰는 기기
+  }
+  // 알림을 누르면 그 프로젝트를 엽니다.
+  const open = (r: Notifications.NotificationResponse | null) => {
+    const id = r?.notification.request.content.data?.projectId;
+    if (typeof id === 'string' && id) setCurrentProject(id);
+  };
+  try {
+    open(Notifications.getLastNotificationResponse());
+    Notifications.addNotificationResponseReceivedListener(open);
+  } catch {
+    // 알림을 못 쓰는 기기
   }
   await registerPush();
 }

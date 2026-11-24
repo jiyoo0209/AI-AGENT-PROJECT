@@ -6,6 +6,7 @@ import * as IntentLauncher from 'expo-intent-launcher';
 import * as Sharing from 'expo-sharing';
 import { authHeaders, serverBase } from './llm';
 import { getSettings } from './settings';
+import { currentIdStore } from './store';
 import { Deliverable } from './types';
 
 /** thumb: 목록용 작은 이미지, preview: 화면용 이미지 (둘 다 서버가 작게 줄인 WebP). 없으면 원본. */
@@ -54,7 +55,8 @@ export function setSiteBase(base: string | undefined) {
 
 /** 퍼블리셔 화면을 앱 안에서 실행할 주소. 아직 서버와 연결 전이면 null */
 export function siteUrl(d: Deliverable): string | null {
-  return siteBase ? `${serverBase(getSettings())}${siteBase}/${d.role}/${encodeURIComponent(d.name)}` : null;
+  const pid = currentIdStore.get();
+  return siteBase && pid ? `${serverBase(getSettings())}${siteBase}/${pid}/${d.role}/${encodeURIComponent(d.name)}` : null;
 }
 
 export async function readText(d: Deliverable): Promise<string> {

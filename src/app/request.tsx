@@ -31,12 +31,15 @@ import { startProjectWithBrief } from '../engine';
 import { useKeyboardShown } from '../keyboard';
 import { px, PxButton } from '../pixel';
 import { PxSelect } from '../PxSelect';
+import { useProjects } from '../store';
 
 const TITLES = ['결과물 종류', '무엇을 만들까요', '산출물과 일정', '기술 스펙 (선택)', '확인하고 보내기'];
 const STEPS = TITLES.length;
 
 export default function RequestScreen() {
   const [step, setStep] = useState(1);
+  const { list, slots } = useProjects();
+  const busyList = list.filter((p) => p.phase === 'planning' || p.phase === 'running');
   const [b, setB] = useState<ProjectBrief>(emptyBrief);
   const [sending, setSending] = useState(false);
   const insets = useSafeAreaInsets();
@@ -236,6 +239,19 @@ export default function RequestScreen() {
                 PM: 이대로면 작업 {taskGuess}개 정도로 나눠서 {b.approval === 'step' ? '하나씩 결재를 올릴게요.' : '끝까지 진행하고 보고할게요.'}
               </Text>
             </View>
+            {slots.used >= slots.max && (
+              <View style={styles.queueBox}>
+                <Text style={styles.queueTitle}>지금 {slots.max}개가 모두 일하는 중이에요</Text>
+                {busyList.map((p) => (
+                  <Text key={p.id} style={styles.queueItem} numberOfLines={1}>
+                    · {p.name} — {p.activity}
+                  </Text>
+                ))}
+                <Text style={styles.queueText}>
+                  이 프로젝트는 대기열 {slots.queued + 1}번째로 들어가요. 하나가 결재 대기로 넘어가거나 끝나면 PM이 바로 계획을 시작하고 알림을 보낼게요.
+                </Text>
+              </View>
+            )}
             <View style={styles.summary}>
               <Row k="종류" v={KINDS.find((k) => k.id === b.kind)?.label ?? ''} strong />
               <Row k="이름" v={b.name.trim() || '(이름 없음)'} strong />
@@ -310,6 +326,10 @@ const styles = StyleSheet.create({
   cell: { flex: 1, height: 10 },
   body: { padding: 16, paddingBottom: 32 },
   hint: { color: px.sub, fontSize: 12, lineHeight: 18 },
+  queueBox: { padding: 12, gap: 4, backgroundColor: px.dark, borderWidth: 2, borderColor: '#6CB6F0' },
+  queueTitle: { color: '#6CB6F0', fontSize: 13, fontWeight: '900', marginBottom: 2 },
+  queueItem: { color: px.cream, fontSize: 12 },
+  queueText: { color: px.cream, fontSize: 12, lineHeight: 18, marginTop: 4 },
   label: { color: px.cream, fontSize: 13, fontWeight: '800' },
   optional: { color: px.sub, fontSize: 11, fontWeight: '700' },
   input: {

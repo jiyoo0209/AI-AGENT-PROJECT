@@ -56,6 +56,8 @@ export type ProjectPhase =
   | 'awaiting_approval'
   | 'running'
   | 'paused'
+  /** 동시 실행 자리(3개)가 꽉 차서 차례를 기다리는 중 */
+  | 'queued'
   | 'done';
 
 export interface Project {
@@ -68,6 +70,25 @@ export interface Project {
   createdAt: number;
   /** 요청 폼으로 시작한 프로젝트의 요청서 */
   brief?: ProjectBrief;
+  /** 이 프로젝트를 만든 기기 */
+  device?: { id: string; name: string };
+}
+
+/** 프로젝트 목록에 보이는 요약 */
+export interface ProjectSummary {
+  id: string;
+  name: string;
+  kind: string;
+  phase: ProjectPhase;
+  /** 대기열 순서 (1부터). 대기열이 아니면 없음 */
+  queuePos?: number;
+  device?: { id: string; name: string };
+  done: number;
+  total: number;
+  /** 지금 하는 일 한 줄 */
+  activity: string;
+  createdAt: number;
+  updatedAt: number;
 }
 
 export interface RoleModel {

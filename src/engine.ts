@@ -2,7 +2,7 @@
 
 import { Alert } from 'react-native';
 import type { ProjectBrief } from './brief';
-import { act, Action } from './sync';
+import { act, Action, createProject } from './sync';
 import { RoleId, Task } from './types';
 
 export function statusLabel(s: Task['status']): string {
@@ -17,12 +17,10 @@ async function send(action: Action) {
   }
 }
 
-export const startProject = (request: string) => send({ type: 'start', request });
-
-/** 요청 폼으로 시작합니다. 성공하면 true */
+/** 요청 폼으로 새 프로젝트를 시작합니다. 성공하면 true */
 export async function startProjectWithBrief(request: string, brief: ProjectBrief): Promise<boolean> {
   try {
-    await act({ type: 'start', request, brief });
+    await createProject(request, brief);
     return true;
   } catch (e) {
     Alert.alert('요청하지 못했어요', e instanceof Error ? e.message : String(e));
@@ -31,5 +29,4 @@ export async function startProjectWithBrief(request: string, brief: ProjectBrief
 }
 export const runTasks = () => send({ type: 'run' });
 export const replan = () => send({ type: 'replan' });
-export const resetProject = () => send({ type: 'reset' });
 export const sendToRoom = (role: RoleId, text: string) => send({ type: 'room', role, text });

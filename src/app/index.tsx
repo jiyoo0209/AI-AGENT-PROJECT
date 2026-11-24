@@ -3,7 +3,6 @@ import { router, Stack } from 'expo-router';
 import { useEffect, useRef, useState } from 'react';
 import {
   ActivityIndicator,
-  Alert,
   Pressable,
   ScrollView,
   type ScrollViewInstance,
@@ -13,13 +12,13 @@ import {
   View,
 } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
-import { replan, resetProject, runTasks } from '../engine';
+import { replan, runTasks } from '../engine';
 import { refreshLimits } from '../llm';
 import { AgentState, OfficeMap } from '../OfficeMap';
 import { EnergyBar, Panel, px, PxButton } from '../pixel';
 import { ROLES, roleInfo } from '../roles';
 import { useSettings } from '../settings';
-import { useBusy, useProject } from '../store';
+import { useBusy, useCurrentProjectId, useProject, useProjects } from '../store';
 import { useSyncStatus } from '../sync';
 import { Project, RoleId, Task } from '../types';
 import { energyColor, remainingPct, resetText, tightestWindow, useUsage } from '../usage';
@@ -134,6 +133,9 @@ function EnergySection() {
 
 export default function Home() {
   const project = useProject();
+  const projects = useProjects();
+  const currentId = useCurrentProjectId();
+  const current = projects.list.find((p) => p.id === currentId);
   const settings = useSettings();
   const busy = useBusy();
   const sync = useSyncStatus();
@@ -156,12 +158,6 @@ export default function Home() {
     if (t.status === 'done') lastDone = t;
     if (t.status === 'pending') break;
   }
-
-  const confirmReset = () =>
-    Alert.alert('새 프로젝트', '현재 프로젝트의 대화와 작업 목록을 지웁니다. 산출물 파일은 서버에 남습니다.', [
-      { text: '취소', style: 'cancel' },
-      { text: '새로 시작', style: 'destructive', onPress: resetProject },
-    ]);
 
   return (
     <>
@@ -196,14 +192,35 @@ export default function Home() {
           <EnergySection />
 
           <View style={styles.projectRow}>
-            <Text style={styles.projectText} numberOfLines={1}>
-              {project.request ? `진행 중 · ${project.request}` : '새 프로젝트를 기다리는 중'}
-            </Text>
-            {project.tasks.length > 0 && (
-              <Text style={styles.progress}>
-                {done}/{project.tasks.length}
+            <Pressable
+              onPress={() => router.push('/projects')}
+              accessibilityRole="button"
+              accessibilityLabel="프로젝트 바꾸기"
+              style={styles.switcher}
+            >
+              <View style={{ flex: 1 }}>
+                <Text style={styles.projectText} numberOfLines={1}>
+                  {current ? `${current.kind} · ${current.name}` : projects.list.length ? '프로젝트를 고르세요' : '새 프로젝트를 기다리는 중'}
+                </Text>
+                {!!current && (
+                  <Text style={styles.projectSub} numberOfLines={1}>
+                    {current.activity}
+                  </Text>
+                )}
+              </View>
+              {project.tasks.length > 0 && (
+                <Text style={styles.progress}>
+                  {done}/{project.tasks.length}
+                </Text>
+              )}
+              <Text style={styles.energyArrow}>▼</Text>
+            </Pressable>
+            <Pressable onPress={() => router.push('/projects')} accessibilityRole="button" style={styles.slotBox}>
+              <Text style={styles.slotLabel}>일하는 중</Text>
+              <Text style={[styles.slotNum, { color: projects.slots.used >= projects.slots.max ? px.coral : px.mint }]}>
+                {projects.slots.used}/{projects.slots.max}
               </Text>
-            )}
+            </Pressable>
           </View>
         </View>
 
@@ -231,6 +248,15 @@ export default function Home() {
               <Text style={styles.boxTitle}>▶ PM에게 지시하기</Text>
               <Text style={styles.boxText}>요청서를 단계별로 채우면 PM이 작업 계획을 세워 대표실로 결재를 올려요.</Text>
               <PxButton title="새 프로젝트 요청하기" onPress={() => router.push('/request')} disabled={needsServer} />
+            </Panel>
+          )}
+
+          {project.phase === 'queued' && (
+            <Panel accent>
+              <Text style={styles.boxTitle}>대기열 {current?.queuePos ? `${current.queuePos}번째` : ''}</Text>
+              <Text style={styles.boxText}>
+                다른 프로젝트 {projects.slots.max}개가 일하는 중이에요. 하나가 끝나거나 결재를 기다리면 자리가 나서 바로 시작해요.
+              </Text>
             </Panel>
           )}
 
@@ -342,9 +368,7 @@ export default function Home() {
           <View style={styles.nav}>
             <PxButton title={`산출물 ${project.deliverables.length}`} variant="dark" onPress={() => router.push('/files')} style={{ flex: 1 }} />
             <PxButton title="에너지" variant="dark" onPress={() => router.push('/energy')} style={{ flex: 1 }} />
-            {project.phase !== 'running' && project.phase !== 'planning' && !!project.request && (
-              <PxButton title="새 프로젝트" variant="dark" onPress={confirmReset} style={{ flex: 1 }} />
-            )}
+            <PxButton title="새 프로젝트" variant="dark" onPress={() => router.push('/request')} style={{ flex: 1 }} disabled={needsServer} />
           </View>
         </View>
       </ScrollView>
@@ -388,7 +412,31 @@ const styles = StyleSheet.create({
   chipPct: { fontSize: 18, fontWeight: '900' },
   chipSub: { color: px.sub, fontSize: 11, marginTop: 5 },
   projectRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: 8, marginVertical: 10 },
-  projectText: { color: px.cream, fontSize: 13, fontWeight: '700', flex: 1 },
+  switcher: {
+    flex: 1,
+    minHeight: 48,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+    backgroundColor: px.panel,
+    borderWidth: 2,
+    borderColor: px.gold,
+  },
+  projectText: { color: px.cream, fontSize: 13, fontWeight: '800' },
+  projectSub: { color: px.sub, fontSize: 11, marginTop: 2 },
+  slotBox: {
+    width: 64,
+    minHeight: 48,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: px.dark,
+    borderWidth: 2,
+    borderColor: px.ink,
+  },
+  slotLabel: { color: px.sub, fontSize: 10, fontWeight: '700' },
+  slotNum: { fontSize: 16, fontWeight: '900' },
   progress: { color: px.gold, fontSize: 13, fontWeight: '900' },
   mapFrame: { borderTopWidth: 3, borderBottomWidth: 3, borderColor: px.ink },
   warn: { color: px.gold, fontSize: 13, fontWeight: '700', lineHeight: 19 },

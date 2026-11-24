@@ -1,6 +1,6 @@
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { useSyncExternalStore } from 'react';
-import { ChatMessage, Project, RoleId } from './types';
+import { ChatMessage, Project, ProjectSummary, RoleId } from './types';
 
 type Listener = () => void;
 
@@ -39,9 +39,39 @@ export function emptyProject(): Project {
 }
 
 const PROJECT_KEY = 'project.v1';
+const CURRENT_KEY = 'project.current';
 
+/** 지금 화면에 보이는 프로젝트 */
 export const projectStore = createStore<Project>(emptyProject());
 export const busyStore = createStore<Partial<Record<RoleId, boolean>>>({});
+
+/** 이 기기가 보고 있는 프로젝트 id (기기마다 따로 기억) */
+export const currentIdStore = createStore<string | null>(null);
+
+export interface ProjectsInfo {
+  list: ProjectSummary[];
+  slots: { used: number; max: number; queued: number };
+}
+/** 서버의 프로젝트 목록과 동시 실행 자리 */
+export const projectsStore = createStore<ProjectsInfo>({ list: [], slots: { used: 0, max: 3, queued: 0 } });
+
+export function setCurrentProject(id: string | null) {
+  if (currentIdStore.get() === id) return;
+  currentIdStore.set(() => id);
+  // 다른 프로젝트의 내용이 잠깐이라도 보이지 않게 비웁니다. 서버 응답이 바로 채웁니다.
+  projectStore.set(() => emptyProject());
+  busyStore.set(() => ({}));
+  if (id) AsyncStorage.setItem(CURRENT_KEY, id).catch(() => {});
+  else AsyncStorage.removeItem(CURRENT_KEY).catch(() => {});
+}
+
+export function useCurrentProjectId(): string | null {
+  return useSyncExternalStore(currentIdStore.subscribe, currentIdStore.get);
+}
+
+export function useProjects(): ProjectsInfo {
+  return useSyncExternalStore(projectsStore.subscribe, projectsStore.get);
+}
 
 let saveTimer: ReturnType<typeof setTimeout> | undefined;
 projectStore.subscribe(() => {
@@ -53,6 +83,8 @@ projectStore.subscribe(() => {
 
 export async function loadProject(): Promise<void> {
   try {
+    const cur = await AsyncStorage.getItem(CURRENT_KEY);
+    if (cur) currentIdStore.set(() => cur);
     const raw = await AsyncStorage.getItem(PROJECT_KEY);
     if (!raw) return;
     // 서버가 진짜 상태를 갖고 있고, 이 값은 서버와 연결되기 전까지 보여 줄 마지막 화면입니다.

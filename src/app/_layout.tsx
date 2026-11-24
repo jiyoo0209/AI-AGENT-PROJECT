@@ -48,6 +48,7 @@ export default function RootLayout() {
         <Stack.Screen name="room/[role]" options={{ title: '채팅방' }} />
         <Stack.Screen name="viewer/[id]" options={{ title: '산출물 보기' }} />
         <Stack.Screen name="site/[id]" options={{ title: '화면 실행' }} />
+        <Stack.Screen name="projects" options={{ title: '프로젝트', contentStyle: { backgroundColor: px.bg } }} />
         <Stack.Screen name="request" options={{ title: '새 프로젝트 요청', contentStyle: { backgroundColor: px.bg } }} />
       </Stack>
     </SafeAreaProvider>

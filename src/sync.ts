@@ -8,22 +8,25 @@ import { docKind, imageSource, pageSource, setSiteBase } from './deliverables';
 import { callServer, refreshLimits } from './llm';
 import { markAttentionSeen, registerPush } from './notify';
 import { getSettings, subscribeSettings } from './settings';
-import { busyStore, projectStore } from './store';
+import { thisDevice } from './device';
+import { busyStore, currentIdStore, emptyProject, projectsStore, ProjectsInfo, projectStore, setCurrentProject } from './store';
 import type { ProjectBrief } from './brief';
 import { Project, Provider, RoleId } from './types';
 import { MonthlyUsage, setMonthlyUsage } from './usage';
 
 export type Action =
-  | { type: 'start'; request: string; brief?: ProjectBrief }
   | { type: 'run' }
   | { type: 'replan' }
-  | { type: 'reset' }
   | { type: 'room'; role: RoleId; text: string };
 
 interface ServerState {
   rev: number;
-  project: Project;
+  /** 요청한 프로젝트가 서버에 있으면 그 id, 없으면 null */
+  projectId: string | null;
+  project: Project | null;
   busy: Partial<Record<RoleId, boolean>>;
+  projects: ProjectsInfo['list'];
+  slots: ProjectsInfo['slots'];
   attention: { id: string; title: string; body: string; at: number } | null;
   usage: { month: string; byProvider: Record<Provider, MonthlyUsage> };
   siteBase?: string;
@@ -79,12 +82,32 @@ function prefetchImages(p: Project) {
   }
 }
 
+/** 보던 프로젝트가 없으면(처음이거나 지워짐) 이 기기에서 만든 최신 프로젝트, 없으면 가장 최근 것을 고릅니다. */
+async function pickFallback(list: ServerState['projects']): Promise<string | null> {
+  if (!list.length) return null;
+  const me = (await thisDevice()).id;
+  return (list.find((p) => p.device?.id === me) ?? list[0]).id;
+}
+
 function apply(s: ServerState) {
   rev = s.rev;
-  projectStore.set(() => s.project);
-  busyStore.set(() => s.busy);
+  projectsStore.set(() => ({ list: s.projects ?? [], slots: s.slots ?? { used: 0, max: 3, queued: 0 } }));
   setSiteBase(s.siteBase);
-  prefetchImages(s.project);
+  const cur = currentIdStore.get();
+  if (!s.project || s.projectId !== cur) {
+    // 이 기기가 보던 프로젝트가 서버에 없으면 다른 것을 고릅니다 (고르면 다시 받아 옵니다).
+    pickFallback(s.projects ?? []).then((id) => {
+      if (id && id !== cur) setCurrentProject(id);
+      else if (!id) {
+        projectStore.set(() => emptyProject());
+        busyStore.set(() => ({}));
+      }
+    });
+  } else {
+    projectStore.set(() => s.project!);
+    busyStore.set(() => s.busy);
+    prefetchImages(s.project);
+  }
   if (s.usage) setMonthlyUsage(s.usage.month, s.usage.byProvider);
   // 앱을 보고 있으면 알림이 따로 필요 없습니다.
   if (s.attention) markAttentionSeen(s.attention.id).catch(() => {});
@@ -103,7 +126,13 @@ async function loop(gen: number) {
     try {
       // 처음 한 번은 바로, 그다음부터는 바뀔 때까지 최대 20초 기다립니다.
       const wait = rev === 0 ? 0 : 20;
-      const s = await callServer<ServerState>(settings, `/v1/state?since=${rev}&wait=${wait}`, undefined, controller?.signal);
+      const cur = currentIdStore.get();
+      const s = await callServer<ServerState>(
+        settings,
+        `/v1/state?since=${rev}&wait=${wait}${cur ? `&project=${encodeURIComponent(cur)}` : ''}`,
+        undefined,
+        controller?.signal,
+      );
       if (gen !== generation) return;
       apply(s);
       failures = 0;
@@ -169,11 +198,36 @@ export function startSync() {
     if (s === 'active') restart();
     else stop();
   });
+  // 다른 프로젝트로 바꾸면 바로 그 프로젝트를 받아 옵니다.
+  let lastCurrent = currentIdStore.get();
+  currentIdStore.subscribe(() => {
+    if (currentIdStore.get() !== lastCurrent) {
+      lastCurrent = currentIdStore.get();
+      restart();
+    }
+  });
+  thisDevice().catch(() => {});
   pushSettings();
   restart();
 }
 
-/** 서버에 일을 시킵니다. 서버는 바로 답하고 일은 뒤에서 계속합니다. */
+/** 지금 보는 프로젝트에 일을 시킵니다. 서버는 바로 답하고 일은 뒤에서 계속합니다. */
 export async function act(action: Action): Promise<void> {
-  await callServer(getSettings(), '/v1/action', action);
+  const project = currentIdStore.get();
+  if (!project) throw new Error('먼저 프로젝트를 고르거나 새로 요청하세요.');
+  await callServer(getSettings(), '/v1/action', { ...action, project });
+}
+
+/** 요청서로 새 프로젝트를 만들고, 이 기기에서 그 프로젝트를 봅니다. */
+export async function createProject(request: string, brief: ProjectBrief): Promise<string> {
+  const device = await thisDevice();
+  const r = await callServer<{ project: string }>(getSettings(), '/v1/action', { type: 'start', request, brief, device });
+  setCurrentProject(r.project);
+  return r.project;
+}
+
+/** 프로젝트를 지웁니다 (일하는 중이 아닐 때만). */
+export async function deleteProject(id: string): Promise<void> {
+  await callServer(getSettings(), '/v1/action', { type: 'delete', project: id });
+  if (currentIdStore.get() === id) setCurrentProject(null);
 }

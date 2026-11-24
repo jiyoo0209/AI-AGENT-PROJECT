@@ -1,6 +1,7 @@
-// 나만의사무실 AI 팀 엔진 (서버에서 실행)
+// 나만의사무실 AI 팀 엔진 (서버에서 실행): 프로젝트 하나를 맡습니다.
 // 폰 앱이 꺼져 있어도 PM 계획 → 결재 → 작업 실행 → 결재를 서버가 이어서 진행하고,
-// 결재가 필요해지면 notify()로 알립니다. 프로젝트·산출물·설정은 dataDir에 저장합니다.
+// 결재가 필요해지면 notify()로 알립니다. 프로젝트·산출물은 dataDir(프로젝트 폴더)에 저장합니다.
+// 여러 프로젝트와 동시 실행 자리(최대 3개)는 projects.ts가 관리합니다.
 
 import { randomBytes } from 'node:crypto';
 import { existsSync, mkdirSync, readFileSync, renameSync, statSync, writeFileSync } from 'node:fs';
@@ -8,7 +9,7 @@ import { basename, join } from 'node:path';
 import { mimeFor, parseReply } from '../src/reply';
 import { docKind, type Documents } from './documents';
 import { BuildError, errorSummary, type ApkBuilder } from './apk';
-import { normalizeBrief, wantsApk, type ProjectBrief } from '../src/brief';
+import { wantsApk } from '../src/brief';
 import { isWorkerRole, roleInfo, ROLES, systemPrompt } from '../src/roles';
 import type { ChatMessage, Deliverable, Project, ProjectPhase, Provider, RoleId, RoleModel, Task } from '../src/types';
 
@@ -39,30 +40,15 @@ export interface OfficeSettings {
   roles: Record<RoleId, RoleModel>;
 }
 
-interface MonthlyUsage {
-  input: number;
-  output: number;
-  requests: number;
-}
-
-interface UsageFile {
-  month: string;
-  byProvider: Record<Provider, MonthlyUsage>;
-}
-
-export interface OfficeState {
-  rev: number;
-  project: Project;
-  busy: Partial<Record<RoleId, boolean>>;
-  attention: Attention | null;
-  usage: UsageFile;
+/** 동시 실행 자리. 자리가 없으면 onWait를 부르고 자리가 날 때까지 기다립니다. */
+export interface Slots {
+  acquire(id: string, onWait: () => void): Promise<void>;
+  release(id: string): void;
 }
 
 export type Action =
-  | { type: 'start'; request: string; brief?: unknown }
   | { type: 'run' }
   | { type: 'replan' }
-  | { type: 'reset' }
   | { type: 'room'; role: RoleId; text: string };
 
 const MAX_FILE_CHARS = 12000;
@@ -81,17 +67,7 @@ function emptyProject(): Project {
   return { request: '', planSummary: '', tasks: [], phase: 'idle', messages: [], deliverables: [], createdAt: Date.now() };
 }
 
-function thisMonth(): string {
-  const d = new Date();
-  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
-}
-
-function emptyUsage(): UsageFile {
-  const zero = (): MonthlyUsage => ({ input: 0, output: 0, requests: 0 });
-  return { month: thisMonth(), byProvider: { claude: zero(), openai: zero() } };
-}
-
-function defaultSettings(): OfficeSettings {
+export function defaultSettings(): OfficeSettings {
   const roles = {} as Record<RoleId, RoleModel>;
   for (const r of ROLES) roles[r.id] = { provider: r.id === 'designer' ? 'openai' : 'claude', model: '' };
   return { stepApproval: true, roles };
@@ -102,7 +78,15 @@ function statusLabel(s: Task['status']): string {
 }
 
 export function createOffice(opts: {
+  /** 프로젝트 id와 폴더 */
+  id: string;
   dataDir: string;
+  /** 처음 만들 때의 프로젝트 (없으면 폴더에서 읽음) */
+  initial?: Partial<Project>;
+  getSettings: () => OfficeSettings;
+  onUsage: (provider: Provider, u?: { input?: number; output?: number }) => void;
+  onChange: () => void;
+  slots: Slots;
   chat: ChatFn;
   image: ImageFn;
   notify: (a: Attention) => void;
@@ -133,34 +117,23 @@ export function createOffice(opts: {
     renameSync(p + '.tmp', p);
   }
 
-  let project: Project = { ...emptyProject(), ...load<Partial<Project>>('project.json', {}) };
-  const savedSettings = load<Partial<OfficeSettings>>('settings.json', {});
-  let settings: OfficeSettings = {
-    ...defaultSettings(),
-    ...savedSettings,
-    roles: { ...defaultSettings().roles, ...(savedSettings.roles ?? {}) },
-  };
-  let usage = load<UsageFile>('usage.json', emptyUsage());
-  let attention = load<Attention | null>('attention.json', null);
+  let project: Project = { ...emptyProject(), ...(opts.initial ?? load<Partial<Project>>('project.json', {})) };
   let busy: Partial<Record<RoleId, boolean>> = {};
-  let rev = 1;
-  const waiters = new Set<() => void>();
   let saveTimer: ReturnType<typeof setTimeout> | undefined;
+  const settings = () => opts.getSettings();
+
+  function saveNow() {
+    try {
+      save('project.json', project);
+    } catch (e) {
+      console.error('[office] 저장 실패', errorText(e));
+    }
+  }
 
   function changed() {
-    rev++;
-    for (const w of waiters) w();
-    waiters.clear();
+    opts.onChange();
     if (saveTimer) clearTimeout(saveTimer);
-    saveTimer = setTimeout(() => {
-      try {
-        save('project.json', project);
-        save('usage.json', usage);
-        save('attention.json', attention);
-      } catch (e) {
-        console.error('[office] 저장 실패', errorText(e));
-      }
-    }, 300);
+    saveTimer = setTimeout(saveNow, 300);
   }
 
   function setProject(update: (p: Project) => Project) {
@@ -188,30 +161,23 @@ export function createOffice(opts: {
   }
 
   function alert(title: string, body: string) {
-    attention = { id: newId(), title, body, at: Date.now() };
-    changed();
     try {
-      opts.notify(attention);
+      opts.notify({ id: newId(), title, body, at: Date.now() });
     } catch (e) {
       console.error('[office] 알림 실패', errorText(e));
     }
   }
 
-  function recordUsage(provider: Provider, u?: { input?: number; output?: number }) {
-    if (usage.month !== thisMonth()) usage = emptyUsage();
-    const cur = usage.byProvider[provider];
-    usage = {
-      ...usage,
-      byProvider: {
-        ...usage.byProvider,
-        [provider]: {
-          input: cur.input + (u?.input ?? 0),
-          output: cur.output + (u?.output ?? 0),
-          requests: cur.requests + 1,
-        },
-      },
-    };
-    changed();
+  const recordUsage = (provider: Provider, u?: { input?: number; output?: number }) => opts.onUsage(provider, u);
+
+  /** AI가 오래 일하는 동안(계획·작업 실행) 동시 실행 자리를 차지합니다. 자리가 없으면 대기열에서 기다립니다. */
+  async function withSlot(work: () => Promise<void>) {
+    await opts.slots.acquire(opts.id, () => setPhase('queued'));
+    try {
+      await work();
+    } finally {
+      opts.slots.release(opts.id);
+    }
   }
 
   // ---------- 산출물 ----------
@@ -380,7 +346,7 @@ export function createOffice(opts: {
   }
 
   async function callAgent(role: RoleId, messages: LlmMessage[]): Promise<string> {
-    const rm = settings.roles[role];
+    const rm = settings().roles[role];
     setBusy(role, true);
     try {
       const r = await opts.chat({ provider: rm.provider, model: rm.model, system: systemPrompt(role), messages });
@@ -532,31 +498,36 @@ export function createOffice(opts: {
     return newTasks.length;
   }
 
-  async function startProject(request: string, brief?: ProjectBrief | null) {
-    setProject(() => ({ ...emptyProject(), request, phase: 'planning', ...(brief ? { brief } : {}) }));
-    addMessage({ role: 'pm', from: 'user', text: request });
-    try {
-      await askPm(`[대표 요청]\n${request}\n\n이 요청을 팀원에게 나눠 할당하는 계획을 PLAN 형식으로 작성하세요.`, true);
-    } catch (e) {
-      setPhase('idle');
-      addMessage({ role: 'pm', from: 'agent', text: `계획 작성 실패: ${errorText(e)}`, error: true });
-      alert('계획을 만들지 못했어요', errorText(e).slice(0, 120));
-    }
+  /** 첫 계획. 요청 메시지는 프로젝트를 만들 때 이미 들어가 있습니다. */
+  async function planProject() {
+    await withSlot(async () => {
+      setPhase('planning');
+      try {
+        await askPm(`[대표 요청]\n${project.request}\n\n이 요청을 팀원에게 나눠 할당하는 계획을 PLAN 형식으로 작성하세요.`, true);
+      } catch (e) {
+        setPhase('idle');
+        addMessage({ role: 'pm', from: 'agent', text: `계획 작성 실패: ${errorText(e)}`, error: true });
+        alert('계획을 만들지 못했어요', errorText(e).slice(0, 120));
+      }
+    });
   }
 
   async function replan() {
-    setProject((p) => ({ ...p, tasks: p.tasks.filter((t) => t.status !== 'pending'), phase: 'planning' }));
+    setProject((p) => ({ ...p, tasks: p.tasks.filter((t) => t.status !== 'pending') }));
     const msg = '대기 중인 작업을 지우고 계획을 다시 작성해 주세요.';
     addMessage({ role: 'pm', from: 'user', text: msg });
-    try {
-      await askPm(msg + ' 완료된 작업은 그대로 두고, 남은 작업만 PLAN에 넣으세요.', false);
-    } catch (e) {
-      setPhase(project.tasks.length ? 'paused' : 'idle');
-      addMessage({ role: 'pm', from: 'agent', text: `계획 작성 실패: ${errorText(e)}`, error: true });
-    }
-    if (project.phase === 'planning') {
-      setPhase(project.tasks.some((t) => t.status === 'pending') ? 'awaiting_approval' : 'done');
-    }
+    await withSlot(async () => {
+      setPhase('planning');
+      try {
+        await askPm(msg + ' 완료된 작업은 그대로 두고, 남은 작업만 PLAN에 넣으세요.', false);
+      } catch (e) {
+        setPhase(project.tasks.length ? 'paused' : 'idle');
+        addMessage({ role: 'pm', from: 'agent', text: `계획 작성 실패: ${errorText(e)}`, error: true });
+      }
+      if (project.phase === 'planning') {
+        setPhase(project.tasks.some((t) => t.status === 'pending') ? 'awaiting_approval' : 'done');
+      }
+    });
   }
 
   let loopRunning = false;
@@ -660,45 +631,48 @@ ${log}
   async function runTasks() {
     if (loopRunning) return;
     loopRunning = true;
-    setPhase('running');
     try {
       setProject((p) => ({ ...p, tasks: p.tasks.map((t) => (t.status === 'failed' ? { ...t, status: 'pending' } : t)) }));
-      while (true) {
-        const next = project.tasks.find((t) => t.status === 'pending');
-        if (!next) {
-          setPhase('done');
-          addMessage({ role: 'pm', from: 'system', text: '모든 작업이 끝났습니다.' });
-          await pmSummary();
-          alert('프로젝트가 끝났어요', 'PM의 완료 보고와 산출물을 확인해 주세요.');
-          return;
-        }
-        await runTask(next);
-        const failed = project.tasks.find((t) => t.id === next.id)?.status === 'failed';
-        const who = roleInfo(next.role).name;
-        if (failed) {
-          setPhase('paused');
-          addMessage({ role: 'pm', from: 'system', text: `"${next.title}" 작업이 실패해 멈췄습니다. 홈에서 다시 시도할 수 있습니다.` });
-          alert(`${who} 작업이 멈췄어요`, `"${next.title}" 작업이 실패했어요. 다시 시도할 수 있어요.`);
-          return;
-        }
-        // 요청서에 정한 결재 방식이 있으면 그걸 따릅니다.
-        const stepApproval = project.brief ? project.brief.approval === 'step' : settings.stepApproval;
-        if (stepApproval && project.tasks.some((t) => t.status === 'pending')) {
-          setPhase('paused');
-          addMessage({ role: 'pm', from: 'system', text: `"${next.title}" 완료. 결과를 확인하고 홈에서 다음 작업을 승인하세요.` });
-          alert('결재가 필요해요', `${who}가 "${next.title}"을 마쳤어요. 확인하고 다음 작업을 승인해 주세요.`);
-          return;
-        }
-      }
+      await withSlot(runLoop);
     } finally {
       loopRunning = false;
+    }
+  }
+
+  async function runLoop() {
+    setPhase('running');
+    while (true) {
+      const next = project.tasks.find((t) => t.status === 'pending');
+      if (!next) {
+        setPhase('done');
+        addMessage({ role: 'pm', from: 'system', text: '모든 작업이 끝났습니다.' });
+        await pmSummary();
+        alert('프로젝트가 끝났어요', 'PM의 완료 보고와 산출물을 확인해 주세요.');
+        return;
+      }
+      await runTask(next);
+      const failed = project.tasks.find((t) => t.id === next.id)?.status === 'failed';
+      const who = roleInfo(next.role).name;
+      if (failed) {
+        setPhase('paused');
+        addMessage({ role: 'pm', from: 'system', text: `"${next.title}" 작업이 실패해 멈췄습니다. 홈에서 다시 시도할 수 있습니다.` });
+        alert(`${who} 작업이 멈췄어요`, `"${next.title}" 작업이 실패했어요. 다시 시도할 수 있어요.`);
+        return;
+      }
+      // 요청서에 정한 결재 방식이 있으면 그걸 따릅니다.
+      const stepApproval = project.brief ? project.brief.approval === 'step' : settings().stepApproval;
+      if (stepApproval && project.tasks.some((t) => t.status === 'pending')) {
+        setPhase('paused');
+        addMessage({ role: 'pm', from: 'system', text: `"${next.title}" 완료. 결과를 확인하고 홈에서 다음 작업을 승인하세요.` });
+        alert('결재가 필요해요', `${who}가 "${next.title}"을 마쳤어요. 확인하고 다음 작업을 승인해 주세요.`);
+        return;
+      }
     }
   }
 
   /** A message the user types in a room. */
   async function sendToRoom(role: RoleId, text: string) {
     if (busy[role]) return;
-    if (role === 'pm' && !project.request) return startProject(text);
     addMessage({ role, from: 'user', text });
     const name = roleInfo(role).name;
     try {
@@ -718,68 +692,46 @@ ${log}
     }
   }
 
-  function reset() {
-    if (loopRunning || Object.values(busy).some(Boolean)) throw new Error('팀원이 일하는 중에는 새로 시작할 수 없어요.');
-    setProject(() => emptyProject());
-  }
-
   // ---------- 서버가 다시 켜졌을 때 ----------
 
-  const wasRunning = project.phase === 'running';
-  project = {
-    ...project,
-    tasks: project.tasks.map((t) => (t.status === 'running' ? { ...t, status: 'pending' } : t)),
-    phase:
-      project.phase === 'planning' ? (project.tasks.length ? 'awaiting_approval' : 'idle') : project.phase,
-  };
-  if (wasRunning) {
-    console.log('[office] 중단된 작업을 이어서 실행합니다.');
-    setTimeout(() => runTasks().catch((e) => console.error('[office]', e)), 1000);
+  /** 멈췄던 계획·작업을 이어서 합니다 (자리가 없으면 대기열로). */
+  function resume() {
+    const was = project.phase;
+    project = { ...project, tasks: project.tasks.map((t) => (t.status === 'running' ? { ...t, status: 'pending' } : t)) };
+    const run = (p: Promise<unknown>) => p.catch((e) => console.error('[office]', e));
+    if (was === 'running' || (was === 'queued' && project.tasks.length > 0)) {
+      console.log(`[office] ${project.brief?.name || project.request.slice(0, 20)}: 중단된 작업을 이어서 실행합니다.`);
+      run(runTasks());
+    } else if (was === 'planning' || (was === 'queued' && project.tasks.length === 0)) {
+      if (project.tasks.length) setPhase('awaiting_approval');
+      else run(planProject());
+    }
   }
 
   // ---------- 바깥에 여는 함수 ----------
 
-  function state(): OfficeState {
-    if (usage.month !== thisMonth()) usage = emptyUsage();
-    return { rev, project, busy, attention, usage };
-  }
-
   return {
-    state,
-
-    /** since와 rev가 같으면 바뀔 때까지(최대 waitMs) 기다렸다가 상태를 돌려줍니다. */
-    waitForChange(since: number, waitMs: number): Promise<OfficeState> {
-      if (since !== rev || waitMs <= 0) return Promise.resolve(state());
-      return new Promise((resolve) => {
-        const done = () => {
-          clearTimeout(timer);
-          waiters.delete(done);
-          resolve(state());
-        };
-        const timer = setTimeout(done, waitMs);
-        waiters.add(done);
-      });
-    },
+    id: opts.id,
+    state: () => ({ project, busy }),
+    project: () => project,
+    busy: () => busy,
+    /** AI가 지금 일하는 중(또는 대기열)인지 */
+    isActive: () => loopRunning || ['planning', 'running', 'queued'].includes(project.phase) || Object.values(busy).some(Boolean),
+    plan: () => planProject().catch((e) => console.error('[office]', e)),
+    resume,
+    flush: saveNow,
 
     /** 바로 응답하고, 작업은 뒤에서 계속합니다. */
     act(a: Action) {
       const run = (p: Promise<unknown>) => p.catch((e) => console.error('[office]', e));
       switch (a.type) {
-        case 'start':
-          if (!a.request?.trim()) throw new Error('요청 내용이 비어 있어요.');
-          if (busy.pm) throw new Error('PM이 다른 일을 하는 중이에요.');
-          run(startProject(a.request.trim(), normalizeBrief(a.brief)));
-          return;
         case 'run':
           if (!project.tasks.some((t) => t.status === 'pending' || t.status === 'failed')) throw new Error('실행할 작업이 없어요.');
           run(runTasks());
           return;
         case 'replan':
-          if (busy.pm || loopRunning) throw new Error('작업 중에는 다시 계획할 수 없어요.');
+          if (busy.pm || loopRunning || project.phase === 'queued') throw new Error('작업 중에는 다시 계획할 수 없어요.');
           run(replan());
-          return;
-        case 'reset':
-          reset();
           return;
         case 'room':
           if (!a.text?.trim() || !ROLES.some((r) => r.id === a.role)) throw new Error('메시지를 확인해 주세요.');
@@ -788,24 +740,6 @@ ${log}
         default:
           throw new Error('알 수 없는 요청이에요.');
       }
-    },
-
-    settings: () => settings,
-
-    setSettings(next: Partial<OfficeSettings>) {
-      const roles = { ...settings.roles };
-      for (const r of ROLES) {
-        const m = next.roles?.[r.id];
-        if (m && (m.provider === 'claude' || m.provider === 'openai')) {
-          roles[r.id] = { provider: m.provider, model: typeof m.model === 'string' ? m.model : '' };
-        }
-      }
-      settings = {
-        stepApproval: typeof next.stepApproval === 'boolean' ? next.stepApproval : settings.stepApproval,
-        roles,
-      };
-      save('settings.json', settings);
-      return settings;
     },
 
     /** 산출물 파일 (없으면 null) */

@@ -58,7 +58,7 @@ export function createPush({ dataDir, serviceAccountPath }) {
     return cached.token;
   }
 
-  async function sendOne(token, { title, body, id }) {
+  async function sendOne(token, { title, body, id, projectId }) {
     const res = await fetch(`https://fcm.googleapis.com/v1/projects/${account.project_id}/messages:send`, {
       method: 'POST',
       headers: { authorization: `Bearer ${await accessToken()}`, 'content-type': 'application/json' },
@@ -66,7 +66,7 @@ export function createPush({ dataDir, serviceAccountPath }) {
         message: {
           token,
           notification: { title, body },
-          data: { attentionId: id },
+          data: { attentionId: id, projectId: projectId || '' },
           android: { priority: 'HIGH', notification: { channel_id: 'approval' } },
         },
       }),

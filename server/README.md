@@ -32,6 +32,8 @@ pm2 restart ai-server
 
 프로젝트, 채팅, 산출물 파일, 설정은 `~/.my-office`에 저장됩니다. 다른 폴더를 쓰려면 `DATA_DIR` 환경 변수를 주세요. 서버를 옮길 때(예: VPS) 이 폴더를 복사하면 그대로 이어집니다.
 
+프로젝트는 여러 개를 만들 수 있고 `~/.my-office/projects/<id>/`에 하나씩 저장됩니다. 기기마다 보고 있는 프로젝트를 따로 기억합니다. 구독 한도 때문에 AI가 계획하거나 작업하는 프로젝트는 **동시에 3개까지**이고, 넘으면 대기열에서 순서대로 시작합니다. 결재를 기다리는 프로젝트는 자리를 차지하지 않습니다. 예전 버전의 프로젝트 하나는 처음 실행할 때 자동으로 `projects/` 아래로 옮겨집니다.
+
 ## 문서·화면 (Word, Excel, PPT, PDF 미리보기, 화면 캡처)
 
 팀원은 Markdown으로 쓰고, 파일명 확장자(.docx, .xlsx, .pptx)에 따라 서버가 Word·Excel·PowerPoint 파일을 만듭니다. 앱에서는 PDF로 바꾼 페이지 이미지로 보여 줍니다. 퍼블리셔 HTML 화면은 앱 안에서 바로 실행되고, 서버가 Chrome으로 캡처해 썸네일과 화면설계서 PPT에 넣습니다.
@@ -51,7 +53,7 @@ brew install --cask libreoffice
 | `GET /v1/files/:id/page/:n` (`?v=thumb`) | 문서 미리보기 n쪽 이미지 |
 | `GET /v1/files/:id/pdf` | 문서 PDF |
 | `GET /v1/files/:id?v=source` | 문서의 Markdown 원본 |
-| `GET /site/<비밀 값>/<역할>/<파일>` | 화면 실행용 (앱의 웹 화면이 씀, 비밀 값은 `/v1/state`의 `siteBase`) |
+| `GET /site/<비밀 값>/<프로젝트>/<역할>/<파일>` | 화면 실행용 (앱의 웹 화면이 씀, 비밀 값은 `/v1/state`의 `siteBase`) |
 
 ## 결재 알림 (선택: Firebase 푸시)
 
@@ -72,8 +74,8 @@ brew install --cask libreoffice
 | `GET /v1/health` | 앱의 연결 테스트 |
 | `POST /v1/chat` | `{ provider: "claude" \| "openai", model, system, messages }` → `{ text, usage, limits? }` |
 | `POST /v1/image` | `{ prompt }` → `{ base64 }` (Codex의 이미지 생성 도구 사용) |
-| `GET /v1/state?since=&wait=` | 프로젝트·바쁜 팀원·알림·사용량. `since`가 지금 버전과 같으면 바뀔 때까지 최대 `wait`초(30초까지) 기다립니다 |
-| `POST /v1/action` | `{ type: "start", request }` · `{ type: "run" }`(승인·다시 시도) · `{ type: "replan" }` · `{ type: "reset" }` · `{ type: "room", role, text }`. 바로 응답하고 일은 뒤에서 계속합니다 |
+| `GET /v1/state?since=&wait=&project=` | `project`의 내용·바쁜 팀원, 프로젝트 목록, 동시 실행 자리(`slots`), 알림, 사용량. `since`가 지금 버전과 같으면 바뀔 때까지 최대 `wait`초(30초까지) 기다립니다 |
+| `POST /v1/action` | `{ type: "start", request, brief, device }` → `{ project }` · `{ type: "delete", project }` · `{ type: "run" \| "replan", project }`(승인·다시 시도·다시 계획) · `{ type: "room", project, role, text }`. 바로 응답하고 일은 뒤에서 계속합니다 |
 | `POST /v1/settings` | `{ roles, stepApproval }` 역할별 모델과 작업마다 결재 |
 | `GET /v1/files/:id` | 산출물 파일 |
 | `POST /v1/push/register` | `{ token }` FCM 푸시 토큰 등록 |

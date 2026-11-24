@@ -402,9 +402,9 @@ function codexLimits() {
 
 const DATA_DIR = process.env.DATA_DIR || join(homedir(), '.my-office');
 mkdirSync(DATA_DIR, { recursive: true });
-// office.ts는 앱과 같은 역할 정의(src/roles.ts)를 쓰므로 TypeScript로 불러옵니다.
+// office.ts·projects.ts는 앱과 같은 역할 정의(src/roles.ts)를 쓰므로 TypeScript로 불러옵니다.
 registerTypeScript();
-const { createOffice } = await import('./office.ts');
+const { createProjects } = await import('./projects.ts');
 const { createDocuments } = await import('./documents.ts');
 const docs = createDocuments(DATA_DIR);
 const { createApkBuilder } = await import('./apk.ts');
@@ -414,7 +414,7 @@ const push = createPush({
   dataDir: DATA_DIR,
   serviceAccountPath: process.env.FIREBASE_SERVICE_ACCOUNT || join(DATA_DIR, 'firebase-service-account.json'),
 });
-const office = createOffice({
+const office = createProjects({
   dataDir: DATA_DIR,
   docs,
   apk,
@@ -427,8 +427,10 @@ const office = createOffice({
   },
   image: (prompt) => codexImage({ prompt }),
   notify: (a) => {
-    console.log(`[알림] ${a.title} — ${a.body}`);
-    push.send(a).catch((e) => console.error('[push]', e?.message || e));
+    // 알림 제목 앞에 프로젝트 이름을 붙입니다.
+    const shown = { ...a, title: `[${a.projectName}] ${a.title}` };
+    console.log(`[알림] ${shown.title} — ${a.body}`);
+    push.send(shown).catch((e) => console.error('[push]', e?.message || e));
   },
 });
 console.log(`데이터 폴더: ${DATA_DIR}`);
@@ -537,7 +539,7 @@ function send(res, status, body, type = 'application/json; charset=utf-8') {
   res.end(text);
 }
 
-// 퍼블리셔 화면 실행 주소: /site/<비밀 값>/<역할>/<파일>
+// 퍼블리셔 화면 실행 주소: /site/<비밀 값>/<프로젝트>/<역할>/<파일>
 // 앱의 웹 화면(WebView)은 CSS·JS·이미지를 불러올 때 토큰 헤더를 붙일 수 없어서, 주소 안의 비밀 값으로 확인합니다.
 const SITE_KEY = createHmac('sha256', TOKEN).update('my-office-site').digest('hex').slice(0, 32);
 const SITE_BASE = `/site/${SITE_KEY}`;
@@ -547,19 +549,19 @@ function textType(mime) {
 }
 
 function serveSite(req, res, url) {
-  const m = url.pathname.match(/^\/site\/([0-9a-f]{32})\/([a-z]+)\/(.+)$/);
+  const m = url.pathname.match(/^\/site\/([0-9a-f]{32})\/([A-Za-z0-9_-]+)\/([a-z]+)\/(.+)$/);
   const key = Buffer.from(m?.[1] || '');
   if (!m || key.length !== SITE_KEY.length || !timingSafeEqual(key, Buffer.from(SITE_KEY))) {
     res.writeHead(404, { 'Content-Type': 'text/plain; charset=utf-8' });
     return res.end('not found');
   }
-  let sub = m[3];
+  let sub = m[4];
   try {
     sub = decodeURIComponent(sub);
   } catch {
     // 그대로 사용
   }
-  const path = office.siteFile(m[2], sub);
+  const path = office.siteFile(m[2], m[3], sub);
   if (!path) {
     res.writeHead(404, { 'Content-Type': 'text/html; charset=utf-8' });
     return res.end(`<meta name="viewport" content="width=device-width"><p style="font-family:sans-serif;padding:24px">아직 없는 화면이에요: ${sub.replace(/[<>&]/g, '')}</p>`);
@@ -605,13 +607,18 @@ const server = http.createServer(async (req, res) => {
     if (req.method === 'GET' && url.pathname === '/v1/state') {
       const since = Number(url.searchParams.get('since') || 0);
       const waitMs = Math.max(0, Math.min(Number(url.searchParams.get('wait') || 0), 30)) * 1000;
-      const s = await office.waitForChange(since, waitMs);
+      const s = await office.waitForChange(since, waitMs, url.searchParams.get('project'));
       return send(res, 200, { ...s, settings: office.settings(), push: push.enabled(), siteBase: SITE_BASE });
     }
     if (req.method === 'POST' && url.pathname === '/v1/action') {
       const body = await readJson(req);
-      console.log(`[action] ${body.type}${body.role ? ' ' + body.role : ''}`);
-      office.act(body);
+      console.log(`[action] ${body.type}${body.project ? ' ' + body.project : ''}${body.role ? ' ' + body.role : ''}`);
+      if (body.type === 'start') return send(res, 200, { ok: true, project: office.create(body) });
+      if (body.type === 'delete') {
+        office.remove(body.project);
+        return send(res, 200, { ok: true });
+      }
+      office.act(body.project, body);
       return send(res, 200, { ok: true });
     }
     if (req.method === 'POST' && url.pathname === '/v1/settings') {
