@@ -300,20 +300,47 @@ function slidesFrom(md: string, fallbackTitle: string): SlideSpec[] {
   return slides.filter((s) => !empty(s) || s.title !== fallbackTitle);
 }
 
+// 글자 폭을 대략 셉니다 (인치). 한글·한자는 글자 크기만큼, 그 밖은 절반 남짓.
+function textWidthIn(text: string, pt: number): number {
+  let em = 0;
+  for (const ch of text) em += /[\u1100-\u11ff\u3000-\u9fff\uac00-\ud7af\uff00-\uffef]/.test(ch) ? 1 : 0.56;
+  return (em * pt) / 72;
+}
+const linesFor = (text: string, pt: number, widthIn: number) => Math.max(1, Math.ceil(textWidthIn(text, pt) / Math.max(0.5, widthIn)));
+
+type Bullet = SlideSpec['bullets'][number];
+const bulletLead = (b: Bullet) => (b.level >= 0 ? `${'      '.repeat(b.level)}${b.level === 0 ? '•' : '–'} ` : '');
+const PARA_GAP = 6; // pt
+
+/** 글머리표 하나가 차지하는 높이 (인치) */
+function bulletHeight(b: Bullet, pt: number, widthIn: number): number {
+  const text = bulletLead(b) + b.runs.map((r) => r.text).join('');
+  return text.split('\n').reduce((h, line) => h + (linesFor(line, pt, widthIn) * pt * 1.2) / 72, 0) + PARA_GAP / 72;
+}
+
+/** 표의 높이 (인치) */
+function tableHeight(table: string[][], pt: number, widthIn: number): number {
+  const colW = widthIn / Math.max(1, table[0]?.length ?? 1) - 0.1;
+  return table.reduce((h, row) => h + (Math.max(...row.map((c) => linesFor(c, pt, colW))) * pt * 1.25) / 72 + 0.1, 0);
+}
+
 async function buildPptx(md: string, out: string, title: string, resolveImage: (ref: string) => Promise<string | null>) {
   const pptx = new PptxGenJS();
   pptx.layout = 'LAYOUT_WIDE'; // 13.33 x 7.5 in
   pptx.title = title;
   const font = 'Malgun Gothic';
   const W = 13.33;
-  const slides = slidesFrom(md, title);
-  let index = 0;
-  for (const s of slides) {
-    index++;
+  const BOTTOM = 6.95; // 이 아래는 쪽 번호 자리
+  const made: ReturnType<typeof pptx.addSlide>[] = [];
+  // 내용이 한 장에 다 들어가지 않으면 남은 글머리표를 "(계속)" 슬라이드로 넘깁니다.
+  const queue = slidesFrom(md, title);
+  while (queue.length) {
+    const s = queue.shift()!;
     const slide = pptx.addSlide();
+    made.push(slide);
     slide.background = { color: 'FFFFFF' };
     slide.addShape(pptx.ShapeType.rect, { x: 0, y: 0, w: W, h: 0.12, fill: { color: '2563EB' }, line: { color: '2563EB' } });
-    slide.addText(s.title, { x: 0.5, y: 0.3, w: W - 1, h: 0.7, fontFace: font, fontSize: 24, bold: true, color: '111827' });
+    slide.addText(s.title, { x: 0.5, y: 0.3, w: W - 1, h: 0.7, fontFace: font, fontSize: 24, bold: true, color: '111827', fit: 'shrink' });
     slide.addShape(pptx.ShapeType.line, { x: 0.5, y: 1.05, w: W - 1, h: 0, line: { color: 'D1D5DB', width: 1 } });
 
     let textX = 0.5;
@@ -339,7 +366,9 @@ async function buildPptx(md: string, out: string, title: string, resolveImage: (
         slide.addImage({ path, x: 0.5 + (box - w) / 2, y: 1.25 + (box - h) / 2, w, h });
       } else {
         slide.addShape(pptx.ShapeType.rect, { x: 0.5, y: 1.25, w: 5.6, h: 5.6, fill: { color: 'F3F4F6' }, line: { color: 'D1D5DB', dashType: 'dash' } });
-        slide.addText(`화면 이미지 없음\n${s.image}`, { x: 0.5, y: 1.25, w: 5.6, h: 5.6, align: 'center', fontFace: font, fontSize: 12, color: '6B7280' });
+        slide.addText(`화면 이미지 준비 중\n${s.image}\n(퍼블리셔가 화면을 만들면 자동으로 채워져요)`, {
+          x: 0.5, y: 1.25, w: 5.6, h: 5.6, align: 'center', fontFace: font, fontSize: 12, color: '6B7280',
+        });
       }
       textX = 6.4;
       textW = W - 6.9;
@@ -347,28 +376,47 @@ async function buildPptx(md: string, out: string, title: string, resolveImage: (
 
     let y = 1.3;
     if (s.table?.length) {
+      // 표가 길면 글자를 줄입니다.
+      let pt = 11;
+      while (pt > 8 && y + tableHeight(s.table, pt, textW) > BOTTOM - (s.bullets.length ? 1.2 : 0)) pt--;
       const rows = s.table.map((r, i) =>
         r.map((c) => ({ text: c, options: i === 0 ? { bold: true, fill: { color: 'DBEAFE' } } : {} })),
       );
-      const h = Math.min(5.5, 0.4 * rows.length);
-      slide.addTable(rows, { x: textX, y, w: textW, fontFace: font, fontSize: 11, border: { type: 'solid', color: '9CA3AF', pt: 0.75 }, autoPage: false });
-      y += h + 0.2;
+      slide.addTable(rows, { x: textX, y, w: textW, fontFace: font, fontSize: pt, border: { type: 'solid', color: '9CA3AF', pt: 0.75 }, autoPage: false });
+      y += tableHeight(s.table, pt, textW) + 0.25;
     }
     if (s.bullets.length) {
+      const room = BOTTOM - y;
+      const innerW = textW - 0.25; // 글상자 안쪽 여백
+      const total = (pt: number) => s.bullets.reduce((h, b) => h + bulletHeight(b, pt, innerW), 0);
+      // 14pt에서 시작해 들어갈 때까지 줄이고, 10pt로도 넘치면 다음 슬라이드로 나눕니다.
+      let pt = 14;
+      while (pt > 10 && total(pt) > room) pt--;
+      let shown = s.bullets;
+      if (total(pt) > room) {
+        let used = 0;
+        let n = 0;
+        while (n < s.bullets.length && used + bulletHeight(s.bullets[n], pt, innerW) <= room) used += bulletHeight(s.bullets[n++], pt, innerW);
+        n = Math.max(1, n);
+        shown = s.bullets.slice(0, n);
+        const rest = s.bullets.slice(n);
+        if (rest.length) queue.unshift({ title: s.title.endsWith('(계속)') ? s.title : `${s.title} (계속)`, bullets: rest, notes: [] });
+      }
       // pptxgenjs는 한 문단 안에서 굵기가 섞이면 글머리표가 깨져서, 글머리표 문자를 직접 붙입니다.
-      const items = s.bullets.flatMap((b) => {
-        const lead = b.level >= 0 ? `${'      '.repeat(b.level)}${b.level === 0 ? '•' : '–'} ` : '';
-        return b.runs.map((r, j) => ({
-          text: (j === 0 ? lead : '') + r.text,
+      const items = shown.flatMap((b) =>
+        b.runs.map((r, j) => ({
+          text: (j === 0 ? bulletLead(b) : '') + r.text,
           options: { bold: r.bold, italic: r.italic, breakLine: j === b.runs.length - 1 },
-        }));
-      });
-      slide.addText(items, { x: textX, y, w: textW, h: Math.max(1, 7.0 - y), valign: 'top', fontFace: font, fontSize: 14, color: '1F2937', paraSpaceAfter: 6 });
+        })),
+      );
+      slide.addText(items, { x: textX, y, w: textW, h: Math.max(0.5, BOTTOM - y), valign: 'top', fontFace: font, fontSize: pt, color: '1F2937', paraSpaceAfter: PARA_GAP });
     }
     if (s.notes.length) slide.addNotes(s.notes.join('\n'));
-    slide.addText(`${title}  ·  ${index}/${slides.length}`, { x: 0.5, y: 7.05, w: W - 1, h: 0.3, fontFace: font, fontSize: 9, color: '9CA3AF', align: 'right' });
   }
-  if (!slides.length) pptx.addSlide().addText(title, { x: 0.5, y: 3, w: W - 1, h: 1, fontSize: 28, bold: true, align: 'center' });
+  made.forEach((slide, i) =>
+    slide.addText(`${title}  ·  ${i + 1}/${made.length}`, { x: 0.5, y: 7.05, w: W - 1, h: 0.3, fontFace: font, fontSize: 9, color: '9CA3AF', align: 'right' }),
+  );
+  if (!made.length) pptx.addSlide().addText(title, { x: 0.5, y: 3, w: W - 1, h: 1, fontSize: 28, bold: true, align: 'center' });
   await pptx.writeFile({ fileName: out });
 }
 

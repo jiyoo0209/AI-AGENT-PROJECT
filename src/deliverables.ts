@@ -18,7 +18,21 @@ export function fileUrl(d: Deliverable, variant?: ImageVariant): string {
 
 /** expo-image에 넘길 이미지 주소. 같은 산출물은 내용이 바뀌지 않으므로 기기에 오래 캐시합니다. */
 export function imageSource(d: Deliverable, variant: ImageVariant) {
-  return { uri: fileUrl(d, variant), headers: fileHeaders() };
+  return stableSource(fileUrl(d, variant));
+}
+
+// 서버 상태가 바뀔 때마다(팀원이 일하는 동안 몇 초마다) 화면이 다시 그려집니다.
+// 이미지 주소 객체를 새로 만들면 expo-image가 같은 이미지를 처음부터 다시 불러와 깜빡이므로, 같은 주소는 같은 객체를 씁니다.
+type Source = { uri: string; headers: Record<string, string> };
+const sources = new Map<string, Source>();
+function stableSource(uri: string): Source {
+  const headers = fileHeaders();
+  const cached = sources.get(uri);
+  if (cached && cached.headers.authorization === headers.authorization) return cached;
+  if (sources.size > 500) sources.clear();
+  const s = { uri, headers };
+  sources.set(uri, s);
+  return s;
 }
 
 export function fileHeaders(): Record<string, string> {
@@ -44,7 +58,7 @@ export function hasThumb(d: Deliverable): boolean {
 
 /** 문서 미리보기의 n번째 페이지 이미지 */
 export function pageSource(d: Deliverable, n: number, thumb = false) {
-  return { uri: `${serverBase(getSettings())}/v1/files/${d.id}/page/${n}${thumb ? '?v=thumb' : ''}`, headers: fileHeaders() };
+  return stableSource(`${serverBase(getSettings())}/v1/files/${d.id}/page/${n}${thumb ? '?v=thumb' : ''}`);
 }
 
 let siteBase = '';

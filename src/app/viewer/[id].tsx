@@ -61,8 +61,12 @@ function CsvTable({ text }: { text: string }) {
 }
 
 /** 문서 한 페이지. 작은 이미지를 먼저 보여 주고 큰 이미지로 바꿉니다. */
+// 페이지 비율을 기억해 둡니다. 스크롤로 페이지가 다시 그려질 때 높이가 바뀌며 화면이 튀지 않게 합니다.
+const pageRatios = new Map<string, number>();
+
 function DocPage({ d, n, total, ratio0 }: { d: Deliverable; n: number; total: number; ratio0: number }) {
-  const [ratio, setRatio] = useState(ratio0);
+  const key = `${d.id}:${n}`;
+  const [ratio, setRatio] = useState(pageRatios.get(key) ?? ratio0);
   return (
     <View style={styles.page}>
       <Image
@@ -72,7 +76,12 @@ function DocPage({ d, n, total, ratio0 }: { d: Deliverable; n: number; total: nu
         cachePolicy="disk"
         contentFit="contain"
         transition={120}
-        onLoad={(e) => e.source.width && setRatio(e.source.width / e.source.height)}
+        onLoad={(e) => {
+          if (!e.source.width) return;
+          const r = e.source.width / e.source.height;
+          pageRatios.set(key, r);
+          if (Math.abs(r - ratio) > 0.01) setRatio(r);
+        }}
         style={[styles.pageImage, { aspectRatio: ratio }]}
         accessibilityLabel={`${d.name} ${n}쪽`}
       />
@@ -112,7 +121,9 @@ function DocPages({ d }: { d: Deliverable }) {
     );
   }
   const total = d.preview?.pages ?? 1;
-  const ratio0 = docKind(d) === 'docx' ? 210 / 297 : 297 / 210;
+  // PPT는 16:9, Word는 A4 세로, Excel은 A4 가로
+  const kind = docKind(d);
+  const ratio0 = kind === 'pptx' ? 13.33 / 7.5 : kind === 'docx' ? 210 / 297 : 297 / 210;
   return (
     <FlatList
       data={Array.from({ length: total }, (_, i) => i + 1)}
