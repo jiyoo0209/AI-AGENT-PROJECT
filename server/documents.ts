@@ -374,6 +374,55 @@ async function buildPptx(md: string, out: string, title: string, resolveImage: (
 
 // ---------- 바깥에 여는 함수 ----------
 
+/** 이 컴퓨터에 있는 한글 글꼴 이름 (맑은 고딕이 있으면 null) */
+function localKoreanFont(): string | null {
+  const home = process.env.HOME ?? '';
+  const has = (...files: string[]) => files.some((f) => existsSync(f));
+  if (has('/Library/Fonts/malgun.ttf', join(home, 'Library/Fonts/malgun.ttf'), '/usr/share/fonts/truetype/malgun.ttf')) return null;
+  if (has('/System/Library/Fonts/AppleSDGothicNeo.ttc')) return 'Apple SD Gothic Neo';
+  if (has('/System/Library/Fonts/Supplemental/AppleGothic.ttf')) return 'AppleGothic';
+  if (has('/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc', '/usr/share/fonts/noto-cjk/NotoSansCJK-Regular.ttc')) return 'Noto Sans CJK KR';
+  return null;
+}
+
+/** LibreOffice 설정에 "맑은 고딕 → 이 컴퓨터의 한글 글꼴" 바꾸기를 넣습니다. */
+function setupFontReplacement(profile: string, font = localKoreanFont()) {
+  if (!font) return;
+  try {
+    const dir = join(profile, 'user');
+    const file = join(dir, 'registrymodifications.xcu');
+    const items =
+      '<item oor:path="/org.openoffice.Office.Common/Font/Substitution"><prop oor:name="Replacement" oor:op="fuse"><value>true</value></prop></item>' +
+      ['Malgun Gothic', '맑은 고딕']
+        .map(
+          (from, i) =>
+            `<item oor:path="/org.openoffice.Office.Common/Font/Substitution/FontPairs"><node oor:name="_${i}" oor:op="replace">` +
+            '<prop oor:name="Always" oor:op="fuse"><value>true</value></prop>' +
+            '<prop oor:name="OnScreenOnly" oor:op="fuse"><value>false</value></prop>' +
+            `<prop oor:name="ReplaceFont" oor:op="fuse"><value>${from}</value></prop>` +
+            `<prop oor:name="SubstituteFont" oor:op="fuse"><value>${font}</value></prop></node></item>`,
+        )
+        .join('');
+    mkdirSync(dir, { recursive: true });
+    if (!existsSync(file)) {
+      writeFileSync(
+        file,
+        '<?xml version="1.0" encoding="UTF-8"?>\n<oor:items xmlns:oor="http://openoffice.org/2001/registry" xmlns:xs="http://www.w3.org/2001/XMLSchema" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">\n' +
+          items +
+          '\n</oor:items>\n',
+      );
+    } else {
+      const xml = readFileSync(file, 'utf8');
+      // LibreOffice가 설정 파일을 다시 쓰면서 주석은 지우므로, 바꿀 글꼴 값으로 이미 넣었는지 봅니다.
+      if (xml.includes(`<value>${font}</value>`)) return;
+      writeFileSync(file, xml.replace('</oor:items>', items + '\n</oor:items>'));
+    }
+    console.log(`[docs] PDF 한글 글꼴: 맑은 고딕 → ${font}`);
+  } catch (e) {
+    console.error('[docs] 글꼴 설정 실패', e instanceof Error ? e.message : e);
+  }
+}
+
 export function createDocuments(dataDir: string) {
   const work = join(dataDir, 'work');
   const previews = join(dataDir, 'previews');
@@ -395,6 +444,11 @@ export function createDocuments(dataDir: string) {
     (m) => (sharp = m.default),
     () => null,
   );
+
+  // 문서는 윈도우 기본 글꼴(맑은 고딕)로 만듭니다. 맥미니에는 맑은 고딕이 없어 PDF에서 한글이 빠지므로
+  // LibreOffice의 글꼴 바꾸기 표로 이 컴퓨터에 있는 한글 글꼴을 대신 쓰게 합니다.
+  const loProfile = join(work, 'lo-profile');
+  setupFontReplacement(loProfile);
 
   // LibreOffice는 한 번에 하나씩만 돌립니다.
   let officeQueue: Promise<unknown> = Promise.resolve();
@@ -472,7 +526,7 @@ export function createDocuments(dataDir: string) {
         await serial(() =>
           run(
             soffice,
-            ['--headless', '--norestore', `-env:UserInstallation=file://${join(work, 'lo-profile')}`, '--convert-to', 'pdf', '--outdir', dir, input],
+            ['--headless', '--norestore', `-env:UserInstallation=${pathToFileURL(loProfile).href}`, '--convert-to', 'pdf', '--outdir', dir, input],
             { timeout: 120_000 },
           ),
         );
