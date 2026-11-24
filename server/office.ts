@@ -7,6 +7,8 @@ import { existsSync, mkdirSync, readFileSync, renameSync, statSync, writeFileSyn
 import { basename, join } from 'node:path';
 import { mimeFor, parseReply } from '../src/reply';
 import { docKind, type Documents } from './documents';
+import { BuildError, errorSummary, type ApkBuilder } from './apk';
+import { normalizeBrief, wantsApk, type ProjectBrief } from '../src/brief';
 import { isWorkerRole, roleInfo, ROLES, systemPrompt } from '../src/roles';
 import type { ChatMessage, Deliverable, Project, ProjectPhase, Provider, RoleId, RoleModel, Task } from '../src/types';
 
@@ -57,7 +59,7 @@ export interface OfficeState {
 }
 
 export type Action =
-  | { type: 'start'; request: string }
+  | { type: 'start'; request: string; brief?: unknown }
   | { type: 'run' }
   | { type: 'replan' }
   | { type: 'reset' }
@@ -108,6 +110,8 @@ export function createOffice(opts: {
   onImageSaved?: (id: string) => void;
   /** Word·Excel·PPT 만들기와 미리보기. 없으면 Markdown 그대로 둡니다. */
   docs?: Documents;
+  /** 개발자 코드로 APK 빌드 */
+  apk?: ApkBuilder;
 }) {
   const { dataDir } = opts;
   const filesDir = join(dataDir, 'files');
@@ -528,8 +532,8 @@ export function createOffice(opts: {
     return newTasks.length;
   }
 
-  async function startProject(request: string) {
-    setProject(() => ({ ...emptyProject(), request, phase: 'planning' }));
+  async function startProject(request: string, brief?: ProjectBrief | null) {
+    setProject(() => ({ ...emptyProject(), request, phase: 'planning', ...(brief ? { brief } : {}) }));
     addMessage({ role: 'pm', from: 'user', text: request });
     try {
       await askPm(`[대표 요청]\n${request}\n\n이 요청을 팀원에게 나눠 할당하는 계획을 PLAN 형식으로 작성하세요.`, true);
@@ -568,10 +572,73 @@ export function createOffice(opts: {
         },
       ]);
       await handleReply(task.role, reply, task.id);
+      if (task.role === 'developer' && wantsApk(project.brief)) await buildApkWithFixes(task);
       updateTask(task.id, { status: 'done' });
     } catch (e) {
       updateTask(task.id, { status: 'failed', error: errorText(e) });
       addMessage({ role: task.role, from: 'agent', text: `작업 실패: ${errorText(e)}`, error: true });
+    }
+  }
+
+  // ---------- APK 빌드 ----------
+
+  const MAX_BUILDS = 3;
+
+  /** 개발자 코드로 APK를 빌드합니다. 실패하면 오류를 개발자에게 보내 고치게 하고 다시 빌드합니다. */
+  async function buildApkWithFixes(task: Task) {
+    const builder = opts.apk;
+    const reason = builder ? builder.unavailable() : '서버에 APK 빌드 기능이 없어요.';
+    if (!builder || reason) {
+      addMessage({ role: 'developer', from: 'system', text: `APK를 만들 수 없어요: ${reason}` });
+      alert('APK를 만들 수 없어요', reason ?? '');
+      return;
+    }
+    const appName = (project.brief?.name || '내 앱').slice(0, 30);
+    const packageId = `com.myoffice.p${project.createdAt.toString(36)}`;
+    for (let attempt = 1; attempt <= MAX_BUILDS; attempt++) {
+      const files = project.deliverables
+        .filter((d) => d.role === 'developer' && !d.isBinary)
+        .map((d) => ({ name: d.name, path: filePath(d) }));
+      addMessage({ role: 'developer', from: 'system', text: `APK 빌드 중… (${attempt}/${MAX_BUILDS}) 처음에는 10분 정도 걸릴 수 있어요.` });
+      setBusy('developer', true);
+      let failure: BuildError | Error;
+      try {
+        const r = await builder.build({ files, appName, packageId });
+        const d = writeDeliverable('developer', `${appName.replace(/[\\/:*?"<>|\s]+/g, '_')}.apk`, readFileSync(r.apk), true, task.id);
+        addMessage({
+          role: 'developer',
+          from: 'agent',
+          text: `설치 파일(APK)을 만들었어요. 빌드 ${Math.ceil(r.seconds / 60)}분. 산출물에서 "설치"를 누르면 폰에 깔려요.`,
+          files: [d.id],
+        });
+        return;
+      } catch (e) {
+        failure = e instanceof Error ? e : new Error(String(e));
+      } finally {
+        setBusy('developer', false);
+      }
+      const log = failure instanceof BuildError ? errorSummary(failure.log) : '';
+      if (attempt === MAX_BUILDS) {
+        addMessage({ role: 'developer', from: 'system', text: `APK 빌드 실패: ${failure.message}
+
+${log.slice(-1500)}` });
+        throw new Error(`APK 빌드에 ${MAX_BUILDS}번 실패했어요. 개발자 채팅방에서 오류를 확인하세요.`);
+      }
+      addMessage({ role: 'developer', from: 'system', text: `APK 빌드 실패 (${attempt}/${MAX_BUILDS}): ${failure.message}. 오류를 고쳐서 다시 빌드할게요.` });
+      const fix = await callAgent('developer', [
+        {
+          role: 'user',
+          content: `${buildContext()}
+
+[APK 빌드 오류]
+${failure.message}
+
+${log}
+
+위 오류가 나지 않도록 고친 파일을 FILE 형식으로 다시 작성하세요. 고친 파일은 내용 전체를 씁니다. Expo 앱 규칙(하위 폴더 없음, package.json, app.json, App.tsx, import './파일명')을 지키세요.`,
+        },
+      ]);
+      await handleReply('developer', fix, task.id);
     }
   }
 
@@ -614,7 +681,9 @@ export function createOffice(opts: {
           alert(`${who} 작업이 멈췄어요`, `"${next.title}" 작업이 실패했어요. 다시 시도할 수 있어요.`);
           return;
         }
-        if (settings.stepApproval && project.tasks.some((t) => t.status === 'pending')) {
+        // 요청서에 정한 결재 방식이 있으면 그걸 따릅니다.
+        const stepApproval = project.brief ? project.brief.approval === 'step' : settings.stepApproval;
+        if (stepApproval && project.tasks.some((t) => t.status === 'pending')) {
           setPhase('paused');
           addMessage({ role: 'pm', from: 'system', text: `"${next.title}" 완료. 결과를 확인하고 홈에서 다음 작업을 승인하세요.` });
           alert('결재가 필요해요', `${who}가 "${next.title}"을 마쳤어요. 확인하고 다음 작업을 승인해 주세요.`);
@@ -699,7 +768,7 @@ export function createOffice(opts: {
         case 'start':
           if (!a.request?.trim()) throw new Error('요청 내용이 비어 있어요.');
           if (busy.pm) throw new Error('PM이 다른 일을 하는 중이에요.');
-          run(startProject(a.request.trim()));
+          run(startProject(a.request.trim(), normalizeBrief(a.brief)));
           return;
         case 'run':
           if (!project.tasks.some((t) => t.status === 'pending' || t.status === 'failed')) throw new Error('실행할 작업이 없어요.');

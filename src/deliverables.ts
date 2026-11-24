@@ -1,6 +1,8 @@
 // 산출물 파일은 서버에 있습니다. 볼 때는 서버에서 읽고, 공유·저장할 때만 기기에 내려받습니다.
 
 import { Directory, File, Paths } from 'expo-file-system';
+import { getContentUriAsync } from 'expo-file-system/legacy';
+import * as IntentLauncher from 'expo-intent-launcher';
 import * as Sharing from 'expo-sharing';
 import { authHeaders, serverBase } from './llm';
 import { getSettings } from './settings';
@@ -31,6 +33,7 @@ export function docKind(d: Deliverable): DocKind | null {
 }
 
 export const isScreen = (d: Deliverable) => d.mime === 'text/html';
+export const isApk = (d: Deliverable) => d.name.toLowerCase().endsWith('.apk');
 
 /** 미리보기(문서 첫 페이지, 화면 캡처, 이미지)가 있어 썸네일을 보여 줄 수 있는지 */
 export function hasThumb(d: Deliverable): boolean {
@@ -77,6 +80,17 @@ async function localCopy(d: Deliverable, kind?: 'pdf' | 'source'): Promise<File>
   if (file.exists && (kind ? file.size > 0 : file.size === d.size)) return file;
   const url = kind === 'pdf' ? `${fileUrl(d)}/pdf` : kind === 'source' ? `${fileUrl(d)}?v=source` : fileUrl(d);
   return File.downloadFileAsync(url, file, { headers: fileHeaders(), idempotent: true });
+}
+
+/** APK를 내려받아 안드로이드 설치 화면을 엽니다. */
+export async function installApk(d: Deliverable): Promise<void> {
+  const file = await localCopy(d);
+  const uri = await getContentUriAsync(file.uri);
+  await IntentLauncher.startActivityAsync('android.intent.action.VIEW', {
+    data: uri,
+    flags: 1, // FLAG_GRANT_READ_URI_PERMISSION
+    type: 'application/vnd.android.package-archive',
+  });
 }
 
 /** 문서를 PDF로 공유합니다 (다른 앱으로 열기). */

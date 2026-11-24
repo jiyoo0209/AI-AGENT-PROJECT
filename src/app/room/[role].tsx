@@ -1,4 +1,5 @@
 import { Stack, useLocalSearchParams } from 'expo-router';
+import { useHeaderHeight } from 'expo-router/react-navigation';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import {
   ActivityIndicator,
@@ -12,6 +13,7 @@ import {
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { sendToRoom } from '../../engine';
 import { FileCard } from '../../FileCard';
+import { useKeyboardShown } from '../../keyboard';
 import { ROLES, roleInfo } from '../../roles';
 import { useSettings, modelLabel } from '../../settings';
 import { useBusy, useProject } from '../../store';
@@ -28,6 +30,9 @@ export default function Room() {
   const insets = useSafeAreaInsets();
   const [text, setText] = useState('');
   const listRef = useRef<FlatList<ChatMessage>>(null);
+  const headerHeight = useHeaderHeight();
+  // 키보드가 올라오면 마지막 메시지가 가려지지 않게 맨 아래로 내립니다.
+  const keyboard = useKeyboardShown(() => setTimeout(() => listRef.current?.scrollToEnd({ animated: true }), 50));
 
   const messages = useMemo(() => project.messages.filter((m) => m.role === role), [project.messages, role]);
   const filesById = useMemo(
@@ -55,12 +60,14 @@ export default function Room() {
       : `${info.name}에게 수정 요청이나 질문을 보내세요`;
 
   return (
-    <KeyboardAvoidingView style={{ flex: 1 }} behavior="padding" keyboardVerticalOffset={insets.top + 56}>
+    <KeyboardAvoidingView style={{ flex: 1 }} behavior="padding" keyboardVerticalOffset={headerHeight}>
       <Stack.Screen options={{ title: `${info.name} 채팅방` }} />
       <FlatList
         ref={listRef}
         data={messages}
         keyExtractor={(m) => m.id}
+        keyboardShouldPersistTaps="handled"
+        onContentSizeChange={() => keyboard && listRef.current?.scrollToEnd({ animated: false })}
         contentContainerStyle={styles.list}
         ListHeaderComponent={
           <Text style={styles.intro}>
@@ -108,7 +115,7 @@ export default function Room() {
           );
         }}
       />
-      <View style={[styles.inputBar, { paddingBottom: Math.max(insets.bottom, 8) }]}>
+      <View style={[styles.inputBar, { paddingBottom: keyboard ? 8 : Math.max(insets.bottom, 8) }]}>
         <TextInput
           style={styles.input}
           value={text}

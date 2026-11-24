@@ -1,3 +1,5 @@
+import type { ProjectBrief } from './brief';
+
 export type RoleId =
   | 'pm'
   | 'planner'
@@ -64,6 +66,8 @@ export interface Project {
   messages: ChatMessage[];
   deliverables: Deliverable[];
   createdAt: number;
+  /** 요청 폼으로 시작한 프로젝트의 요청서 */
+  brief?: ProjectBrief;
 }
 
 export interface RoleModel {

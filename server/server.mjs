@@ -10,6 +10,7 @@ import { createReadStream, existsSync, mkdirSync, openSync, readFileSync, readSy
 import http from 'node:http';
 import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { gzipSync } from 'node:zlib';
 import { register as registerTypeScript } from 'tsx/esm/api';
 import { createPush } from './push.mjs';
@@ -406,6 +407,9 @@ registerTypeScript();
 const { createOffice } = await import('./office.ts');
 const { createDocuments } = await import('./documents.ts');
 const docs = createDocuments(DATA_DIR);
+const { createApkBuilder } = await import('./apk.ts');
+const apk = createApkBuilder(DATA_DIR, fileURLToPath(new URL('..', import.meta.url)));
+console.log(`[apk] ${apk.unavailable() ?? 'APK 빌드 사용'}`);
 const push = createPush({
   dataDir: DATA_DIR,
   serviceAccountPath: process.env.FIREBASE_SERVICE_ACCOUNT || join(DATA_DIR, 'firebase-service-account.json'),
@@ -413,6 +417,7 @@ const push = createPush({
 const office = createOffice({
   dataDir: DATA_DIR,
   docs,
+  apk,
   onImageSaved: (id) => {
     for (const v of ['thumb', 'preview']) imageVariant(id, v).catch(() => {});
   },

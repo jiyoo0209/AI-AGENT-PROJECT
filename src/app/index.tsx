@@ -1,3 +1,4 @@
+import AsyncStorage from '@react-native-async-storage/async-storage';
 import { router, Stack } from 'expo-router';
 import { useEffect, useRef, useState } from 'react';
 import {
@@ -8,12 +9,11 @@ import {
   type ScrollViewInstance,
   StyleSheet,
   Text,
-  TextInput,
   useWindowDimensions,
   View,
 } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
-import { replan, resetProject, runTasks, startProject } from '../engine';
+import { replan, resetProject, runTasks } from '../engine';
 import { refreshLimits } from '../llm';
 import { AgentState, OfficeMap } from '../OfficeMap';
 import { EnergyBar, Panel, px, PxButton } from '../pixel';
@@ -84,6 +84,54 @@ function EnergyChip(props: { name: string; provider: 'claude' | 'openai' }) {
   );
 }
 
+const ENERGY_OPEN_KEY = 'home.energyOpen';
+
+/** 에너지 칸: 화살표로 접고 펼칩니다. 접으면 한 줄 요약만 보여요. */
+function EnergySection() {
+  const usage = useUsage();
+  const [open, setOpen] = useState(true);
+  useEffect(() => {
+    AsyncStorage.getItem(ENERGY_OPEN_KEY).then((v) => v === '0' && setOpen(false), () => {});
+  }, []);
+  const toggle = () => {
+    const next = !open;
+    setOpen(next);
+    AsyncStorage.setItem(ENERGY_OPEN_KEY, next ? '1' : '0').catch(() => {});
+  };
+  const pctOf = (p: 'claude' | 'openai') => {
+    const pct = remainingPct(usage.limits[p]);
+    return { pct, color: energyColor(pct) };
+  };
+  const c = pctOf('claude');
+  const o = pctOf('openai');
+  return (
+    <View style={{ marginTop: 10, gap: 8 }}>
+      <Pressable
+        onPress={toggle}
+        accessibilityRole="button"
+        accessibilityState={{ expanded: open }}
+        accessibilityLabel={open ? 'AI 에너지 접기' : 'AI 에너지 펼치기'}
+        style={styles.energyToggle}
+      >
+        <Text style={styles.energyTitle}>AI 에너지</Text>
+        {!open && (
+          <Text style={styles.energyShort} numberOfLines={1}>
+            Claude <Text style={{ color: c.color }}>{c.pct === undefined ? '—' : `${c.pct}%`}</Text>
+            {'  ·  '}ChatGPT <Text style={{ color: o.color }}>{o.pct === undefined ? '—' : `${o.pct}%`}</Text>
+          </Text>
+        )}
+        <Text style={styles.energyArrow}>{open ? '▲' : '▼'}</Text>
+      </Pressable>
+      {open && (
+        <View style={styles.chips}>
+          <EnergyChip name="Claude" provider="claude" />
+          <EnergyChip name="ChatGPT" provider="openai" />
+        </View>
+      )}
+    </View>
+  );
+}
+
 export default function Home() {
   const project = useProject();
   const settings = useSettings();
@@ -91,7 +139,6 @@ export default function Home() {
   const sync = useSyncStatus();
   const insets = useSafeAreaInsets();
   const { width } = useWindowDimensions();
-  const [request, setRequest] = useState('');
   const scrollRef = useRef<ScrollViewInstance>(null);
   const [panelY, setPanelY] = useState(0);
 
@@ -109,13 +156,6 @@ export default function Home() {
     if (t.status === 'done') lastDone = t;
     if (t.status === 'pending') break;
   }
-
-  const start = () => {
-    const text = request.trim();
-    if (!text) return;
-    setRequest('');
-    startProject(text);
-  };
 
   const confirmReset = () =>
     Alert.alert('새 프로젝트', '현재 프로젝트의 대화와 작업 목록을 지웁니다. 산출물 파일은 서버에 남습니다.', [
@@ -153,10 +193,7 @@ export default function Home() {
             </Pressable>
           )}
 
-          <View style={styles.chips}>
-            <EnergyChip name="Claude" provider="claude" />
-            <EnergyChip name="ChatGPT" provider="openai" />
-          </View>
+          <EnergySection />
 
           <View style={styles.projectRow}>
             <Text style={styles.projectText} numberOfLines={1}>
@@ -192,16 +229,8 @@ export default function Home() {
           {project.phase === 'idle' && !project.request && (
             <Panel accent>
               <Text style={styles.boxTitle}>▶ PM에게 지시하기</Text>
-              <TextInput
-                style={styles.input}
-                value={request}
-                onChangeText={setRequest}
-                placeholder="예: 회의실 예약 앱 기획부터 시작해줘"
-                placeholderTextColor="#8F8BAE"
-                multiline
-                textAlignVertical="top"
-              />
-              <PxButton title="보내기" onPress={start} disabled={!request.trim() || needsServer} />
+              <Text style={styles.boxText}>요청서를 단계별로 채우면 PM이 작업 계획을 세워 대표실로 결재를 올려요.</Text>
+              <PxButton title="새 프로젝트 요청하기" onPress={() => router.push('/request')} disabled={needsServer} />
             </Panel>
           )}
 
@@ -340,7 +369,20 @@ const styles = StyleSheet.create({
     borderColor: px.ink,
   },
   iconText: { color: px.cream, fontWeight: '800', fontSize: 13 },
-  chips: { flexDirection: 'row', gap: 8, marginTop: 10 },
+  chips: { flexDirection: 'row', gap: 8 },
+  energyToggle: {
+    minHeight: 40,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+    paddingHorizontal: 10,
+    backgroundColor: px.panel,
+    borderWidth: 2,
+    borderColor: px.ink,
+  },
+  energyTitle: { color: px.gold, fontSize: 12, fontWeight: '800' },
+  energyShort: { flex: 1, color: px.cream, fontSize: 12, fontWeight: '700' },
+  energyArrow: { marginLeft: 'auto', color: px.gold, fontSize: 12, fontWeight: '900' },
   chipHead: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 5 },
   chipName: { color: px.cream, fontSize: 12, fontWeight: '800' },
   chipPct: { fontSize: 18, fontWeight: '900' },

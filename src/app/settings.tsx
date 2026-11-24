@@ -1,6 +1,7 @@
 import { router } from 'expo-router';
+import { useHeaderHeight } from 'expo-router/react-navigation';
 import { useState } from 'react';
-import { Alert, Modal, Pressable, ScrollView, StyleSheet, Switch, Text, TextInput, View } from 'react-native';
+import { Alert, KeyboardAvoidingView, Modal, Pressable, ScrollView, StyleSheet, Switch, Text, TextInput, View } from 'react-native';
 import { checkServer } from '../llm';
 import { ROLES } from '../roles';
 import { defaultModel, modelLabel, modelOptions, saveSettings, useSettings } from '../settings';
@@ -59,6 +60,7 @@ export default function SettingsScreen() {
   const [draft, setDraft] = useState<Settings>(() => JSON.parse(JSON.stringify(saved)));
   const [saving, setSaving] = useState(false);
   const [testing, setTesting] = useState(false);
+  const headerHeight = useHeaderHeight();
 
   const testServer = async () => {
     setTesting(true);
@@ -90,6 +92,7 @@ export default function SettingsScreen() {
   };
 
   return (
+    <KeyboardAvoidingView style={{ flex: 1 }} behavior="padding" keyboardVerticalOffset={headerHeight}>
     <ScrollView contentContainerStyle={styles.container} keyboardShouldPersistTaps="handled">
       <Card>
         <Text style={styles.title}>맥미니 서버</Text>
@@ -165,6 +168,7 @@ export default function SettingsScreen() {
 
       <Button title="저장" onPress={save} loading={saving} />
     </ScrollView>
+    </KeyboardAvoidingView>
   );
 }
 

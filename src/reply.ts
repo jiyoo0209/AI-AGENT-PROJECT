@@ -57,6 +57,7 @@ const MIME: Record<string, string> = {
   js: 'text/javascript',
   mjs: 'text/javascript',
   pdf: 'application/pdf',
+  apk: 'application/vnd.android.package-archive',
   docx: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
   xlsx: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
   pptx: 'application/vnd.openxmlformats-officedocument.presentationml.presentation',

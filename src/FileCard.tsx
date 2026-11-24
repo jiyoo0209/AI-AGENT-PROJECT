@@ -1,7 +1,7 @@
 import { Image } from 'expo-image';
 import { router } from 'expo-router';
 import { Alert, Pressable, StyleSheet, Text, View } from 'react-native';
-import { downloadDeliverable, hasThumb, imageSource, isScreen, shareDeliverable, sharePdf } from './deliverables';
+import { downloadDeliverable, hasThumb, imageSource, installApk, isApk, isScreen, shareDeliverable, sharePdf } from './deliverables';
 import { roleInfo } from './roles';
 import { Deliverable } from './types';
 import { Button, colors } from './ui';
@@ -11,6 +11,14 @@ export async function shareWithAlert(d: Deliverable) {
     await shareDeliverable(d);
   } catch (e) {
     Alert.alert('공유 실패', e instanceof Error ? e.message : String(e));
+  }
+}
+
+export async function installWithAlert(d: Deliverable) {
+  try {
+    await installApk(d);
+  } catch (e) {
+    Alert.alert('설치 화면을 열지 못했어요', `${e instanceof Error ? e.message : String(e)}\n\n"다운로드"로 받은 뒤 파일 앱에서 눌러 설치할 수도 있어요.`);
   }
 }
 
@@ -57,7 +65,8 @@ export function FileCard({ d, showRole }: { d: Deliverable; showRole?: boolean }
       </Pressable>
       <View style={styles.actions}>
         {isScreen(d) && <Button small title="▶ 실행" onPress={() => router.push(`/site/${d.id}`)} />}
-        <Button small variant="secondary" title="보기" onPress={() => router.push(`/viewer/${d.id}`)} />
+        {isApk(d) && <Button small title="설치" onPress={() => installWithAlert(d)} />}
+        {!isApk(d) && <Button small variant="secondary" title="보기" onPress={() => router.push(`/viewer/${d.id}`)} />}
         <Button small variant="secondary" title="공유" onPress={() => shareWithAlert(d)} />
         <Button small title="다운로드" onPress={() => downloadWithAlert(d)} />
       </View>

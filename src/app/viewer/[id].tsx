@@ -2,8 +2,8 @@ import { router, Stack, useLocalSearchParams } from 'expo-router';
 import { useEffect, useState } from 'react';
 import { Image } from 'expo-image';
 import { ActivityIndicator, FlatList, ScrollView, StyleSheet, Text, View } from 'react-native';
-import { docKind, imageSource, isScreen, pageSource, readText } from '../../deliverables';
-import { downloadWithAlert, sharePdfWithAlert, shareWithAlert } from '../../FileCard';
+import { docKind, imageSource, isApk, isScreen, pageSource, readText } from '../../deliverables';
+import { downloadWithAlert, installWithAlert, sharePdfWithAlert, shareWithAlert } from '../../FileCard';
 import { roleInfo } from '../../roles';
 import { useProject } from '../../store';
 import { Deliverable } from '../../types';
@@ -169,6 +169,11 @@ export default function Viewer() {
       </View>
       {kind ? (
         <DocPages d={d} />
+      ) : isApk(d) ? (
+        <View style={[styles.center, { gap: 12 }]}>
+          <Text style={styles.sub}>안드로이드 설치 파일이에요. 처음 설치할 때 "이 출처 허용"을 물으면 허용해 주세요.</Text>
+          <Button title="설치" onPress={() => installWithAlert(d)} />
+        </View>
       ) : d.isBinary ? (
         <ScrollView contentContainerStyle={{ padding: 12 }}>
           <Image

@@ -1,6 +1,7 @@
 // AI 팀 운영은 서버(server/office.ts)에서 합니다. 앱은 지시와 결재만 보냅니다.
 
 import { Alert } from 'react-native';
+import type { ProjectBrief } from './brief';
 import { act, Action } from './sync';
 import { RoleId, Task } from './types';
 
@@ -17,6 +18,17 @@ async function send(action: Action) {
 }
 
 export const startProject = (request: string) => send({ type: 'start', request });
+
+/** 요청 폼으로 시작합니다. 성공하면 true */
+export async function startProjectWithBrief(request: string, brief: ProjectBrief): Promise<boolean> {
+  try {
+    await act({ type: 'start', request, brief });
+    return true;
+  } catch (e) {
+    Alert.alert('요청하지 못했어요', e instanceof Error ? e.message : String(e));
+    return false;
+  }
+}
 export const runTasks = () => send({ type: 'run' });
 export const replan = () => send({ type: 'replan' });
 export const resetProject = () => send({ type: 'reset' });

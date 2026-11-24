@@ -9,11 +9,12 @@ import { callServer, refreshLimits } from './llm';
 import { markAttentionSeen, registerPush } from './notify';
 import { getSettings, subscribeSettings } from './settings';
 import { busyStore, projectStore } from './store';
+import type { ProjectBrief } from './brief';
 import { Project, Provider, RoleId } from './types';
 import { MonthlyUsage, setMonthlyUsage } from './usage';
 
 export type Action =
-  | { type: 'start'; request: string }
+  | { type: 'start'; request: string; brief?: ProjectBrief }
   | { type: 'run' }
   | { type: 'replan' }
   | { type: 'reset' }
