@@ -184,12 +184,6 @@ export default function RequestScreen() {
             </View>
             <View style={styles.row2}>
               <PxSelect label="희망 마감" value={b.due} options={DUE_OPTIONS} onChange={(due) => set({ due })} />
-              <PxSelect
-                label="결재 방식"
-                value={b.approval === 'step' ? '작업마다 결재' : '끝까지 진행'}
-                options={['작업마다 결재', '끝까지 진행']}
-                onChange={(v) => set({ approval: v === '끝까지 진행' ? 'end' : 'step' })}
-              />
             </View>
           </View>
         )}
@@ -236,7 +230,7 @@ export default function RequestScreen() {
           <View style={{ gap: 12 }}>
             <View style={styles.pmLine}>
               <Text style={styles.pmText}>
-                PM: 이대로면 작업 {taskGuess}개 정도로 나눠서 {b.approval === 'step' ? '하나씩 결재를 올릴게요.' : '끝까지 진행하고 보고할게요.'}
+                PM: 이대로면 작업 {taskGuess}개 정도로 나눠서 하나씩 결재를 올릴게요.
               </Text>
             </View>
             {slots.used >= slots.max && (
@@ -259,7 +253,6 @@ export default function RequestScreen() {
               <Row k="사용자" v={b.users.trim() || '(적지 않음)'} />
               <Row k="산출물" v={pickedOuts.map((o) => o.label).join(', ') || '(없음)'} />
               <Row k="마감" v={b.due} />
-              <Row k="결재" v={b.approval === 'step' ? '작업마다 결재' : '끝까지 진행'} />
               <Row
                 k="기술 스펙"
                 v={

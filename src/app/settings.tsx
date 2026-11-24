@@ -1,7 +1,7 @@
 import { router } from 'expo-router';
 import { useHeaderHeight } from 'expo-router/react-navigation';
 import { useState } from 'react';
-import { Alert, KeyboardAvoidingView, Modal, Pressable, ScrollView, StyleSheet, Switch, Text, TextInput, View } from 'react-native';
+import { Alert, KeyboardAvoidingView, Modal, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
 import { checkServer } from '../llm';
 import { ROLES } from '../roles';
 import { defaultModel, modelLabel, modelOptions, saveSettings, useSettings } from '../settings';
@@ -156,16 +156,6 @@ export default function SettingsScreen() {
         })}
       </Card>
 
-      <Card>
-        <View style={styles.switchRow}>
-          <View style={{ flex: 1 }}>
-            <Text style={styles.title}>작업마다 결재</Text>
-            <Text style={styles.sub}>켜면 작업 하나가 끝날 때마다 담당 팀원이 대표실로 와서 결재를 기다립니다.</Text>
-          </View>
-          <Switch value={draft.stepApproval} onValueChange={(v) => setDraft((d) => ({ ...d, stepApproval: v }))} />
-        </View>
-      </Card>
-
       <Button title="저장" onPress={save} loading={saving} />
     </ScrollView>
     </KeyboardAvoidingView>
@@ -217,5 +207,4 @@ const styles = StyleSheet.create({
   optionSelected: { borderColor: colors.primary, backgroundColor: '#EFF6FF' },
   optionLabel: { fontSize: 15, fontWeight: '600', color: colors.text },
   optionNote: { fontSize: 12, color: colors.sub, marginTop: 2 },
-  switchRow: { flexDirection: 'row', alignItems: 'center', gap: 12 },
 });

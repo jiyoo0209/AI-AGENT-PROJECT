@@ -659,9 +659,8 @@ ${log}
         alert(`${who} 작업이 멈췄어요`, `"${next.title}" 작업이 실패했어요. 다시 시도할 수 있어요.`);
         return;
       }
-      // 요청서에 정한 결재 방식이 있으면 그걸 따릅니다.
-      const stepApproval = project.brief ? project.brief.approval === 'step' : settings().stepApproval;
-      if (stepApproval && project.tasks.some((t) => t.status === 'pending')) {
+      // 작업 하나가 끝나면 항상 대표 결재를 받아야 다음 작업으로 넘어갑니다.
+      if (project.tasks.some((t) => t.status === 'pending')) {
         setPhase('paused');
         addMessage({ role: 'pm', from: 'system', text: `"${next.title}" 완료. 결과를 확인하고 홈에서 다음 작업을 승인하세요.` });
         alert('결재가 필요해요', `${who}가 "${next.title}"을 마쳤어요. 확인하고 다음 작업을 승인해 주세요.`);

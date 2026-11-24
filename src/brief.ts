@@ -146,7 +146,7 @@ export function normalizeBrief(raw: unknown): ProjectBrief | null {
     users: str(r.users, 500),
     outputs: Array.isArray(r.outputs) ? r.outputs.filter((o): o is OutputId => OUTPUTS.some((x) => x.id === o)) : PRESET[kind],
     due: str(r.due, 50) || base.due,
-    approval: r.approval === 'end' ? 'end' : 'step',
+    approval: 'step', // 결재는 항상 작업마다
     tech,
   };
 }
